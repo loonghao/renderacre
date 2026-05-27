@@ -1,0 +1,23 @@
+[package]
+name = "renderacre-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "renderacre"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+farm-core = { path = "../farm-core" }
+pyo3.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true

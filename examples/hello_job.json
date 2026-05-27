@@ -1,0 +1,17 @@
+{
+  "name": "hello-powershell",
+  "priority": 0,
+  "max_retries": 0,
+  "tasks": [
+    {
+      "name": "hello",
+      "command": {
+        "executable": "python",
+        "args": [
+          "-c",
+          "print('hello from renderacre worker')"
+        ]
+      }
+    }
+  ]
+}
