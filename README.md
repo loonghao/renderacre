@@ -3,6 +3,7 @@
 [![CI](https://github.com/loonghao/renderacre/actions/workflows/ci.yml/badge.svg)](https://github.com/loonghao/renderacre/actions/workflows/ci.yml)
 [![DCC E2E](https://github.com/loonghao/renderacre/actions/workflows/dcc-e2e.yml/badge.svg)](https://github.com/loonghao/renderacre/actions/workflows/dcc-e2e.yml)
 [![Release](https://github.com/loonghao/renderacre/actions/workflows/release.yml/badge.svg)](https://github.com/loonghao/renderacre/actions/workflows/release.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/loonghao/renderacre?label=github%20release)](https://github.com/loonghao/renderacre/releases)
 [![PyPI](https://img.shields.io/pypi/v/renderacre.svg)](https://pypi.org/project/renderacre/)
 [![Python](https://img.shields.io/pypi/pyversions/renderacre.svg)](https://pypi.org/project/renderacre/)
 [![Downloads](https://static.pepy.tech/badge/renderacre)](https://pepy.tech/project/renderacre)
@@ -11,6 +12,58 @@
 Renderacre is a Rust render-farm foundation inspired by Deadline: a remote controller API, standalone workers, Python submitter bindings, and Open Job Description (OpenJD) job templates for portable DCC and batch workloads.
 
 The Python package is named `renderacre` and is built as a `cp37-abi3` wheel, so one wheel supports CPython 3.7 and newer on each platform.
+
+## Installation
+
+Install the Python submitter API from PyPI:
+
+```bash
+python -m pip install renderacre
+```
+
+The published wheels use `cp37-abi3`, which means each platform wheel supports CPython 3.7 and newer.
+
+Install the standalone controller and worker binaries from GitHub Releases.
+
+Linux/macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.ps1 -UseB | iex
+```
+
+Pin a release or install directory when deploying render nodes:
+
+```bash
+export RENDERACRE_VERSION=v0.1.4
+export RENDERACRE_INSTALL_DIR=/opt/renderacre/bin
+curl -fsSL https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.sh | bash
+```
+
+```powershell
+$env:RENDERACRE_VERSION = "v0.1.4"
+$env:RENDERACRE_INSTALL_DIR = "$env:LOCALAPPDATA\renderacre\bin"
+iwr https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.ps1 -UseB | iex
+```
+
+After installation, run the farm processes:
+
+```bash
+renderacre-controller --bind 0.0.0.0:7878
+renderacre-worker --controller http://controller-host:7878 --name render-node-01 --label app=blender
+```
+
+For source builds:
+
+```bash
+cargo install --path crates/farm-controller --locked
+cargo install --path crates/farm-worker --locked
+```
 
 ## Features
 
@@ -125,6 +178,8 @@ Supported current extensions default to all extensions known by `openjd-model`: 
 
 Renderacre includes a Vite + React dashboard under `dashboard/`. It uses shadcn-style components, compact queue tables, worker status panels, an OpenJD task inspector, and a stdout tail view.
 
+![Renderacre dashboard queue preview](docs/images/renderacre-dashboard.png)
+
 Run it during development:
 
 ```powershell
@@ -200,22 +255,6 @@ Recommended first deployment shape:
 - Use GitHub Releases or PyPI to distribute the `renderacre` wheel to submitter machines.
 
 Current storage is in-memory by design for the first protocol slice. The scheduler boundary is isolated so SQLite/Postgres/NATS can replace it without changing the Python or REST APIs.
-
-### Install Binaries
-
-Linux/macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.sh | bash
-```
-
-Windows PowerShell:
-
-```powershell
-iwr https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.ps1 -UseB | iex
-```
-
-Set `RENDERACRE_VERSION` / `-Version` and `RENDERACRE_INSTALL_DIR` / `-InstallDir` to pin a release or install path.
 
 ## Release
 
