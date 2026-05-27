@@ -1,13 +1,17 @@
+#[cfg(test)]
+use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 
+use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use clap::{Parser, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use farm_core::{
     AuditEvent, DashboardSnapshot, FarmError, FarmLogEntry, FarmMetrics, FarmStats,
     HealthComponent, HealthReport, HealthStatus, InMemoryScheduler, Job, JobId, JobPriorityUpdate,
@@ -15,12 +19,16 @@ use farm_core::{
     Task, TaskComplete, TaskId, TaskLease, TaskLeaseRenewal, TaskStarted, WorkerId, WorkerInfo,
     WorkerLogBatch, WorkerRegister,
 };
+use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 #[derive(Debug, Parser)]
 struct Args {
+    #[arg(long, env = "RFARM_CONFIG")]
+    config: Option<PathBuf>,
     #[arg(long, env = "RFARM_BIND", default_value = "127.0.0.1:7878")]
     bind: SocketAddr,
     #[arg(long, env = "RFARM_LEASE_SECONDS", default_value_t = 120)]
@@ -29,12 +37,92 @@ struct Args {
     storage: StorageBackend,
     #[arg(long, env = "RFARM_SQLITE_PATH", default_value = "renderacre.sqlite3")]
     sqlite_path: PathBuf,
+    #[arg(long, env = "RFARM_DASHBOARD_DIR")]
+    dashboard_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum StorageBackend {
     Memory,
     Sqlite,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ControllerConfig {
+    bind: Option<SocketAddr>,
+    lease_seconds: Option<i64>,
+    storage: Option<StorageBackend>,
+    sqlite_path: Option<PathBuf>,
+    dashboard_dir: Option<PathBuf>,
+}
+
+impl Args {
+    fn load() -> anyhow::Result<Self> {
+        Self::from_matches(Self::command().get_matches())
+    }
+
+    #[cfg(test)]
+    fn load_from<I, T>(iter: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let matches = Self::command().try_get_matches_from(iter)?;
+        Self::from_matches(matches)
+    }
+
+    fn from_matches(matches: ArgMatches) -> anyhow::Result<Self> {
+        let mut args = Self::from_arg_matches(&matches)?;
+        let config = ControllerConfig::load(args.config.as_deref())?;
+        args.apply_config(config, &matches);
+        Ok(args)
+    }
+
+    fn apply_config(&mut self, config: ControllerConfig, matches: &ArgMatches) {
+        if value_from_default(matches, "bind") {
+            if let Some(bind) = config.bind {
+                self.bind = bind;
+            }
+        }
+        if value_from_default(matches, "lease_seconds") {
+            if let Some(lease_seconds) = config.lease_seconds {
+                self.lease_seconds = lease_seconds;
+            }
+        }
+        if value_from_default(matches, "storage") {
+            if let Some(storage) = config.storage {
+                self.storage = storage;
+            }
+        }
+        if value_from_default(matches, "sqlite_path") {
+            if let Some(sqlite_path) = config.sqlite_path {
+                self.sqlite_path = sqlite_path;
+            }
+        }
+        if matches.value_source("dashboard_dir").is_none() {
+            if let Some(dashboard_dir) = config.dashboard_dir {
+                self.dashboard_dir = Some(dashboard_dir);
+            }
+        }
+    }
+}
+
+impl ControllerConfig {
+    fn load(path: Option<&FsPath>) -> anyhow::Result<Self> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse config file {}", path.display()))
+    }
+}
+
+fn value_from_default(matches: &ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::DefaultValue)
 }
 
 #[derive(Clone)]
@@ -295,7 +383,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let args = Args::load()?;
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     let config = SchedulerConfig {
         lease_ttl_seconds: args.lease_seconds,
@@ -308,12 +396,15 @@ async fn main() -> anyhow::Result<()> {
         )?),
     };
     tracing::info!("controller listening on http://{}", args.bind);
-    axum::serve(listener, app(scheduler)).await?;
+    if let Some(dashboard_dir) = args.dashboard_dir.as_ref() {
+        tracing::info!(path = %dashboard_dir.display(), "serving dashboard assets");
+    }
+    axum::serve(listener, app(scheduler, args.dashboard_dir)).await?;
     Ok(())
 }
 
-fn app(scheduler: AppScheduler) -> Router {
-    Router::new()
+fn app(scheduler: AppScheduler, dashboard_dir: Option<PathBuf>) -> Router {
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(healthz))
         .route("/v1/health", get(healthz))
@@ -352,7 +443,14 @@ fn app(scheduler: AppScheduler) -> Router {
         )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(scheduler)
+        .with_state(scheduler);
+
+    if let Some(dashboard_dir) = dashboard_dir {
+        let index = dashboard_dir.join("index.html");
+        router.fallback_service(ServeDir::new(dashboard_dir).fallback(ServeFile::new(index)))
+    } else {
+        router
+    }
 }
 
 async fn healthz(State(scheduler): State<AppScheduler>) -> Json<HealthReport> {
@@ -622,6 +720,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_file_overrides_controller_defaults() {
+        let config_path = write_config(
+            "controller",
+            r#"
+bind: 127.0.0.1:9001
+lease_seconds: 45
+storage: sqlite
+sqlite_path: data/renderacre.sqlite3
+dashboard_dir: dashboard/dist
+"#,
+        );
+
+        let args = Args::load_from([
+            "renderacre-controller",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .expect("config should load");
+
+        assert_eq!(args.bind, "127.0.0.1:9001".parse::<SocketAddr>().unwrap());
+        assert_eq!(args.lease_seconds, 45);
+        assert_eq!(args.storage, StorageBackend::Sqlite);
+        assert_eq!(args.sqlite_path, PathBuf::from("data/renderacre.sqlite3"));
+        assert_eq!(args.dashboard_dir, Some(PathBuf::from("dashboard/dist")));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn command_line_values_override_controller_config() {
+        let config_path = write_config(
+            "controller-cli",
+            r#"
+bind: 127.0.0.1:9001
+lease_seconds: 45
+storage: sqlite
+sqlite_path: data/renderacre.sqlite3
+dashboard_dir: dashboard/dist
+"#,
+        );
+
+        let args = Args::load_from([
+            "renderacre-controller",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--bind",
+            "127.0.0.1:9002",
+            "--storage",
+            "memory",
+        ])
+        .expect("config should load");
+
+        assert_eq!(args.bind, "127.0.0.1:9002".parse::<SocketAddr>().unwrap());
+        assert_eq!(args.storage, StorageBackend::Memory);
+        assert_eq!(args.lease_seconds, 45);
+        assert_eq!(args.dashboard_dir, Some(PathBuf::from("dashboard/dist")));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
     fn health_report_includes_controller_and_scheduler_status() {
         let scheduler = AppScheduler::Memory(InMemoryScheduler::default());
         let report = scheduler.health_report();
@@ -631,5 +788,12 @@ mod tests {
         assert_eq!(report.scheduler.status, HealthStatus::Ready);
         assert_eq!(report.scheduler.backend.as_deref(), Some("memory"));
         assert!(report.degraded.is_empty());
+    }
+
+    fn write_config(name: &str, content: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("renderacre-{name}-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, content).expect("config should write");
+        path
     }
 }
