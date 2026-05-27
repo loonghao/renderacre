@@ -14,7 +14,7 @@ use futures_util::future::{FutureExt, LocalBoxFuture};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use openjd_expr::SerializedSymbolTable;
 use openjd_model::{ModelExtension, ModelProfile, SpecificationRevision, TaskParameterSet};
-use openjd_sessions::{ActionState, Session, SessionConfig, StickyBitPolicy};
+use openjd_sessions::{ActionState, ActionStatus, Session, SessionConfig, StickyBitPolicy};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 
@@ -44,6 +44,8 @@ struct WorkerLogSink {
     controller: String,
     worker_id: WorkerId,
 }
+
+type OpenJdStatusCallback = Box<dyn Fn(&str, &ActionStatus) + Send + Sync>;
 
 impl WorkerLogSink {
     fn new(client: reqwest::Client, controller: String, worker_id: WorkerId) -> Self {
@@ -174,7 +176,8 @@ async fn register_worker(
     controller: &str,
     args: &Args,
 ) -> Result<WorkerInfo> {
-    let labels = args.labels.iter().cloned().collect::<HashMap<_, _>>();
+    let mut labels = args.labels.iter().cloned().collect::<HashMap<_, _>>();
+    add_default_openjd_capabilities(&mut labels, args.slots.max(1));
     let name = args.name.clone().unwrap_or_else(default_worker_name);
     let worker = client
         .post(format!("{controller}/v1/workers/register"))
@@ -191,6 +194,36 @@ async fn register_worker(
         .json()
         .await?;
     Ok(worker)
+}
+
+fn add_default_openjd_capabilities(labels: &mut HashMap<String, String>, slots: u32) {
+    labels
+        .entry("attr.worker.os.family".to_string())
+        .or_insert_with(openjd_os_family);
+    labels
+        .entry("attr.worker.cpu.arch".to_string())
+        .or_insert_with(openjd_cpu_arch);
+    labels
+        .entry("amount.worker.vcpu".to_string())
+        .or_insert_with(|| slots.max(1).to_string());
+}
+
+fn openjd_os_family() -> String {
+    match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "macos",
+        _ => "linux",
+    }
+    .to_string()
+}
+
+fn openjd_cpu_arch() -> String {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        other => other,
+    }
+    .to_string()
 }
 
 async fn heartbeat(client: &reqwest::Client, controller: &str, worker_id: WorkerId) -> Result<()> {
@@ -449,6 +482,28 @@ async fn execute_openjd(
         .cloned()
         .map(Into::into)
         .collect::<Vec<_>>();
+    let callback_log_sink = log_sink.clone();
+    let callback_job_id = task.job_id;
+    let callback_task_id = task.id;
+    let callback: OpenJdStatusCallback =
+        Box::new(move |session_id: &str, status: &ActionStatus| {
+            let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+                return;
+            };
+            let log_sink = callback_log_sink.clone();
+            let message = format_openjd_action_status(session_id, status);
+            handle.spawn(async move {
+                log_sink
+                    .post_line(
+                        LogLevel::Info,
+                        Some("openjd-status".to_string()),
+                        message,
+                        Some(callback_job_id),
+                        Some(callback_task_id),
+                    )
+                    .await;
+            });
+        });
 
     let config = SessionConfig {
         session_id: format!("renderacre-{}", uuid::Uuid::new_v4()),
@@ -459,7 +514,7 @@ async fn execute_openjd(
             Some(path_mapping_rules)
         },
         retain_working_dir: false,
-        callback: None,
+        callback: Some(callback),
         os_env_vars: None,
         session_root_directory: Some(tmp.path().to_path_buf()),
         user: None,
@@ -618,6 +673,26 @@ async fn execute_openjd(
         stderr,
         artifacts: Vec::new(),
     })
+}
+
+fn format_openjd_action_status(session_id: &str, status: &ActionStatus) -> String {
+    let mut parts = vec![format!(
+        "OpenJD session {session_id} action state={}",
+        status.state
+    )];
+    if let Some(progress) = status.progress {
+        parts.push(format!("progress={progress:.2}"));
+    }
+    if let Some(message) = &status.status_message {
+        parts.push(format!("status={message}"));
+    }
+    if let Some(message) = &status.fail_message {
+        parts.push(format!("fail={message}"));
+    }
+    if let Some(exit_code) = status.exit_code {
+        parts.push(format!("exit_code={exit_code}"));
+    }
+    parts.join(" ")
 }
 
 async fn read_stream_lines<R>(

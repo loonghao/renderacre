@@ -118,6 +118,7 @@ function TasksTab({ job, onTaskAction }: { job: ApiJob; onTaskAction: (action: T
           <small>attempt {task.attempts}/{Math.max(task.max_retries + 1, 1)}</small>
           <small>{upstream.length ? `${upstream.length} upstream` : "root"}</small>
           <small>{downstream.length ? `${downstream.length} downstream` : "terminal"}</small>
+          <small>{requirementSummary(task)}</small>
           <small>{task.artifacts?.length ?? 0} artifacts</small>
           {missingDependencies.length ? <small className="dependency-warning">missing {missingDependencies.length}</small> : null}
           <div className="row-actions">
@@ -193,6 +194,17 @@ function WorkerAssignment({ worker }: { worker?: ApiWorker }) {
       )}
     </section>
   );
+}
+
+function requirementSummary(task: ApiTask) {
+  const requirements = task.requirements;
+  if (!requirements) return "any worker";
+  const labelCount = Object.keys(requirements.labels ?? {}).length;
+  const poolCount = requirements.pools?.length ?? 0;
+  const amountCount = requirements.amounts?.length ?? 0;
+  const attributeCount = requirements.attributes?.length ?? 0;
+  const total = labelCount + poolCount + amountCount + attributeCount;
+  return total ? `${total} requirements` : "any worker";
 }
 
 function openArtifact(apiBase: string, taskId: string, artifactIndex: number) {

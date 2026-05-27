@@ -7,8 +7,9 @@ use openjd_model::template::parse::{decode_job_template, document_string_to_obje
 use openjd_model::{CallerLimits, JobParameterInputValues, ModelExtension, PathParameterOptions};
 
 use crate::models::{
-    json_to_openjd_input_value, CommandSpec, OpenJdEnvironmentRuntime, OpenJdParameterValue,
-    OpenJdRuntimeTask, OpenJdSubmit, TaskSubmit,
+    json_to_openjd_input_value, CommandSpec, OpenJdAmountRequirement, OpenJdAttributeRequirement,
+    OpenJdEnvironmentRuntime, OpenJdParameterValue, OpenJdRuntimeTask, OpenJdSubmit,
+    TaskRequirements, TaskSubmit,
 };
 use crate::scheduler::FarmError;
 
@@ -210,7 +211,11 @@ fn expand_openjd_tasks(
                 name: task_name,
                 command,
                 dependencies,
-                requirements: Default::default(),
+                requirements: step
+                    .host_requirements
+                    .as_ref()
+                    .map(openjd_host_requirements)
+                    .unwrap_or_default(),
                 max_retries: None,
                 artifact_paths: infer_artifact_paths(&job_parameters),
                 openjd: Some(openjd),
@@ -232,6 +237,40 @@ fn infer_artifact_paths(job_parameters: &HashMap<String, OpenJdParameterValue>) 
             value.value.as_str().map(PathBuf::from)
         })
         .collect()
+}
+
+fn openjd_host_requirements(value: &openjd_model::job::HostRequirements) -> TaskRequirements {
+    TaskRequirements {
+        amounts: value
+            .amounts
+            .as_ref()
+            .map(|amounts| {
+                amounts
+                    .iter()
+                    .map(|amount| OpenJdAmountRequirement {
+                        name: amount.name.clone(),
+                        min: amount.min,
+                        max: amount.max,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        attributes: value
+            .attributes
+            .as_ref()
+            .map(|attributes| {
+                attributes
+                    .iter()
+                    .map(|attribute| OpenJdAttributeRequirement {
+                        name: attribute.name.clone(),
+                        any_of: attribute.any_of.clone().unwrap_or_default(),
+                        all_of: attribute.all_of.clone().unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ..Default::default()
+    }
 }
 
 fn task_parameter_sets(
@@ -432,6 +471,44 @@ steps:
         assert!(tasks.iter().any(|task| task.name.contains("Frame=1")));
         assert!(tasks.iter().any(|task| task.name.contains("Frame=2")));
         assert!(tasks.iter().any(|task| task.name.contains("Frame=3")));
+    }
+
+    #[test]
+    fn preserves_openjd_host_requirements_for_scheduler() {
+        let bundle = OpenJdSubmit {
+            template_yaml: r#"
+specificationVersion: jobtemplate-2023-09
+name: HostRequirements
+steps:
+  - name: LinuxRender
+    hostRequirements:
+      amounts:
+        - name: amount.worker.vcpu
+          min: 2
+      attributes:
+        - name: attr.worker.os.family
+          anyOf: [linux]
+    script:
+      actions:
+        onRun:
+          command: echo
+"#
+            .to_string(),
+            parameters: HashMap::new(),
+            asset_root: None,
+            supported_extensions: Vec::new(),
+            path_mapping_rules: Vec::new(),
+            template_dir: None,
+            current_working_dir: None,
+        };
+
+        let tasks = openjd_to_tasks(&bundle).expect("OpenJD should parse");
+        assert_eq!(tasks.len(), 1);
+        let requirements = &tasks[0].requirements;
+        assert_eq!(requirements.amounts[0].name, "amount.worker.vcpu");
+        assert_eq!(requirements.amounts[0].min, Some(2.0));
+        assert_eq!(requirements.attributes[0].name, "attr.worker.os.family");
+        assert_eq!(requirements.attributes[0].any_of, vec!["linux"]);
     }
 
     #[test]

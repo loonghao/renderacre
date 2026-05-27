@@ -18,6 +18,25 @@ export interface ApiArtifact {
   modified_at?: string | null;
 }
 
+export interface ApiAmountRequirement {
+  name: string;
+  min?: number | null;
+  max?: number | null;
+}
+
+export interface ApiAttributeRequirement {
+  name: string;
+  anyOf?: string[];
+  allOf?: string[];
+}
+
+export interface ApiTaskRequirements {
+  labels?: Record<string, string>;
+  pools?: string[];
+  amounts?: ApiAmountRequirement[];
+  attributes?: ApiAttributeRequirement[];
+}
+
 export interface ApiTask {
   id: string;
   name: string;
@@ -25,6 +44,7 @@ export interface ApiTask {
   attempts: number;
   max_retries: number;
   dependencies: string[];
+  requirements?: ApiTaskRequirements;
   last_exit_code?: number | null;
   artifact_paths?: string[];
   artifacts?: ApiArtifact[];

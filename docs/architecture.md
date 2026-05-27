@@ -46,7 +46,9 @@ available worker slots for API and dashboard consumers.
 Task routing is schema-driven and backward-compatible. A task may require worker
 labels and one of several pools; workers advertise those capabilities during
 registration. Unconstrained tasks keep the previous behavior and can run on any
-worker.
+worker. OpenJD `hostRequirements` are carried through the same scheduler path:
+standard amount capabilities are read from worker labels or slot capacity, and
+standard attribute capabilities are read from worker labels.
 
 Lifecycle actions are idempotent where repeating the same request is safe, and
 invalid state transitions return a conflict response with a descriptive error.
@@ -56,8 +58,8 @@ invalid state transitions return a conflict response with a descriptive error.
 The controller accepts an OpenJD template bundle under `openjd.template_yaml`. It uses the official OpenJD Rust crates instead of a hand-written parser:
 
 - `openjd-model` parses YAML/JSON, validates the template, preprocesses typed job parameters, creates the resolved job model, and expands step parameter spaces.
-- Renderacre converts each resolved step/task combination into a farm task while preserving OpenJD runtime context such as parameter values, path mappings, environments, embedded files, and supported extensions.
-- `openjd-sessions` runs the task on the worker, including environment enter/exit actions and OpenJD stdout directive handling.
+- Renderacre converts each resolved step/task combination into a farm task while preserving OpenJD runtime context such as parameter values, path mappings, environments, embedded files, supported extensions, dependencies, and host requirements.
+- `openjd-sessions` runs the task on the worker, including environment enter/exit actions, OpenJD stdout directive handling, and progress/status callbacks.
 
 OpenJD conversion stays separate from scheduler storage, so durable queues do not
 change Python submitters or worker execution payloads.

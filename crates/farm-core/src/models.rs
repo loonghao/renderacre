@@ -50,6 +50,30 @@ pub struct TaskRequirements {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub pools: Vec<String>,
+    #[serde(default)]
+    pub amounts: Vec<OpenJdAmountRequirement>,
+    #[serde(default)]
+    pub attributes: Vec<OpenJdAttributeRequirement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenJdAmountRequirement {
+    pub name: String,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenJdAttributeRequirement {
+    pub name: String,
+    #[serde(default)]
+    pub any_of: Vec<String>,
+    #[serde(default)]
+    pub all_of: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

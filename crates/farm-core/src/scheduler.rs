@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::models::{
     DashboardSnapshot, FarmLogEntry, FarmStats, Job, JobId, JobState, JobSubmit, LogLevel,
-    LogSource, Task, TaskArtifact, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
-    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo,
-    WorkerLogBatch, WorkerRegister, WorkerState,
+    LogSource, OpenJdAmountRequirement, OpenJdAttributeRequirement, Task, TaskArtifact,
+    TaskComplete, TaskId, TaskLease, TaskLeaseInfo, TaskLeaseRenewal, TaskStarted, TaskState,
+    TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -962,28 +962,114 @@ fn task_matches_worker(
     };
 
     let pool_matches = task.requirements.pools.is_empty()
-        || worker.labels.get("pool").is_some_and(|pool| {
+        || worker_label_value(worker, "pool").is_some_and(|pool| {
             task.requirements
                 .pools
                 .iter()
-                .any(|required| required == pool)
+                .any(|required| label_value_matches(pool, required))
         });
     let labels_match = task.requirements.labels.iter().all(|(key, required)| {
-        worker
-            .labels
-            .get(key)
-            .is_some_and(|actual| label_value_matches(actual, required))
+        worker_label_value(worker, key).is_some_and(|actual| label_value_matches(actual, required))
     });
+    let amounts_match = task
+        .requirements
+        .amounts
+        .iter()
+        .all(|amount| worker_satisfies_amount(worker, amount));
+    let attributes_match = task
+        .requirements
+        .attributes
+        .iter()
+        .all(|attribute| worker_satisfies_attribute(worker, attribute));
 
-    pool_matches && labels_match
+    pool_matches && labels_match && amounts_match && attributes_match
+}
+
+fn worker_satisfies_amount(worker: &WorkerInfo, requirement: &OpenJdAmountRequirement) -> bool {
+    let Some(value) = worker_amount(worker, &requirement.name) else {
+        return false;
+    };
+    if requirement.min.is_some_and(|min| value < min) {
+        return false;
+    }
+    if requirement.max.is_some_and(|max| value > max) {
+        return false;
+    }
+    true
+}
+
+fn worker_amount(worker: &WorkerInfo, name: &str) -> Option<f64> {
+    if name.eq_ignore_ascii_case("amount.worker.vcpu") {
+        return worker_label_value(worker, name)
+            .and_then(|value| value.parse::<f64>().ok())
+            .or(Some(worker.capacity.slots.max(1) as f64));
+    }
+    worker_label_value(worker, name).and_then(|value| value.parse::<f64>().ok())
+}
+
+fn worker_satisfies_attribute(
+    worker: &WorkerInfo,
+    requirement: &OpenJdAttributeRequirement,
+) -> bool {
+    let values = worker_attribute_values(worker, &requirement.name);
+    if values.is_empty() {
+        return false;
+    }
+    if !requirement.any_of.is_empty()
+        && !requirement
+            .any_of
+            .iter()
+            .any(|expected| values.contains(&expected.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    if !requirement
+        .all_of
+        .iter()
+        .all(|expected| values.contains(&expected.to_ascii_lowercase()))
+    {
+        return false;
+    }
+    true
+}
+
+fn worker_attribute_values(worker: &WorkerInfo, name: &str) -> Vec<String> {
+    worker_label_value(worker, name)
+        .map(|value| {
+            value
+                .split([',', ';'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn label_value_matches(actual: &str, required: &str) -> bool {
     actual == required
         || actual
-            .split(',')
+            .split([',', ';'])
             .map(str::trim)
             .any(|candidate| candidate == required)
+}
+
+fn worker_label_value<'a>(worker: &'a WorkerInfo, name: &str) -> Option<&'a str> {
+    worker
+        .labels
+        .get(name)
+        .map(String::as_str)
+        .or_else(|| {
+            let lower = name.to_ascii_lowercase();
+            worker.labels.get(&lower).map(String::as_str)
+        })
+        .or_else(|| {
+            worker
+                .labels
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        })
 }
 
 fn dependencies_are_satisfied(state: &SchedulerState, job_id: JobId, task_id: TaskId) -> bool {
@@ -1150,8 +1236,8 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
 #[cfg(test)]
 mod tests {
     use crate::models::{
-        CommandSpec, TaskLease, TaskLeaseRenewal, TaskRequirements, WorkerCapacity, WorkerId,
-        WorkerInfo,
+        CommandSpec, OpenJdAmountRequirement, OpenJdAttributeRequirement, TaskLease,
+        TaskLeaseRenewal, TaskRequirements, WorkerCapacity, WorkerId, WorkerInfo,
     };
 
     use super::*;
@@ -1555,6 +1641,7 @@ mod tests {
                                 ("app".to_string(), "maya".to_string()),
                             ]),
                             pools: vec!["lighting".to_string()],
+                            ..Default::default()
                         },
                         max_retries: None,
                         artifact_paths: Vec::new(),
@@ -1567,6 +1654,7 @@ mod tests {
                         requirements: TaskRequirements {
                             labels: HashMap::from([("os".to_string(), "linux".to_string())]),
                             pools: vec!["sim".to_string()],
+                            ..Default::default()
                         },
                         max_retries: None,
                         artifact_paths: Vec::new(),
@@ -1624,6 +1712,65 @@ mod tests {
             .expect("worker should register");
 
         assert!(scheduler.lease_task(worker.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn openjd_host_requirements_match_worker_capabilities() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "openjd-routing".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "linux-two-vcpu".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    requirements: TaskRequirements {
+                        amounts: vec![OpenJdAmountRequirement {
+                            name: "amount.worker.vcpu".to_string(),
+                            min: Some(2.0),
+                            max: None,
+                        }],
+                        attributes: vec![OpenJdAttributeRequirement {
+                            name: "attr.worker.os.family".to_string(),
+                            any_of: vec!["linux".to_string()],
+                            all_of: Vec::new(),
+                        }],
+                        ..Default::default()
+                    },
+                    max_retries: None,
+                    artifact_paths: Vec::new(),
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+
+        let small_linux_worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "small-linux".to_string(),
+                labels: HashMap::from([("ATTR.WORKER.OS.FAMILY".to_string(), "linux".to_string())]),
+                capacity: WorkerCapacity { slots: 1 },
+            })
+            .expect("worker should register");
+        assert!(scheduler
+            .lease_task(small_linux_worker.id)
+            .unwrap()
+            .is_none());
+
+        let large_linux_worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "large-linux".to_string(),
+                labels: HashMap::from([("attr.worker.os.family".to_string(), "linux".to_string())]),
+                capacity: WorkerCapacity { slots: 2 },
+            })
+            .expect("worker should register");
+        let lease = scheduler
+            .lease_task(large_linux_worker.id)
+            .expect("lease should work")
+            .expect("matching OpenJD worker should be leased");
+        assert_eq!(lease.task.name, "linux-two-vcpu");
     }
 
     #[test]

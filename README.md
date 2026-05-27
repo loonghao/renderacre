@@ -71,7 +71,8 @@ cargo install --path crates/farm-worker --locked
 - Standalone worker binary that executes direct commands or OpenJD runtime payloads.
 - Controller-collected worker logs, controller events, task stdout/stderr tails, downloadable task artifacts, and upstream/downstream task dependency tracking.
 - Official `openjd-model` validation and job creation for OpenJD `jobtemplate-2023-09`.
-- Official `openjd-sessions` execution for OpenJD step scripts, task parameters, environments, embedded files, and OpenJD stdout directives.
+- Official `openjd-sessions` execution for OpenJD step scripts, task parameters, environments, embedded files, progress/status callbacks, and OpenJD stdout directives.
+- OpenJD `hostRequirements` routing through worker capabilities such as `attr.worker.os.family`, `attr.worker.cpu.arch`, and `amount.worker.vcpu`.
 - PyO3/maturin Python module for pipeline submitters and DCC tools.
 - CI for fmt, clippy, unit tests, controller/worker e2e smoke, and ABI3 wheel builds.
 - Release workflow for cross-platform wheels, sdist, and PyPI Trusted Publishing.
@@ -136,13 +137,19 @@ payloads:
   "command": { "executable": "mayapy", "args": ["render.py"] },
   "requirements": {
     "labels": { "os": "windows", "app": "maya" },
-    "pools": ["lighting"]
+    "pools": ["lighting"],
+    "amounts": [{ "name": "amount.worker.vcpu", "min": 2 }],
+    "attributes": [
+      { "name": "attr.worker.os.family", "anyOf": ["windows"] }
+    ]
   }
 }
 ```
 
 Workers advertise matching capabilities with labels such as
-`--label os=windows --label app=maya --label pool=lighting`.
+`--label os=windows --label app=maya --label pool=lighting`. Renderacre workers
+also register default OpenJD capabilities for OS family, CPU architecture, and
+slot count, so OpenJD `hostRequirements` work out of the box for common cases.
 
 Common queue operations are available as stable action endpoints:
 
@@ -203,16 +210,19 @@ The controller:
 3. Preprocesses typed job parameters, including `PATH` values.
 4. Creates the resolved OpenJD job model.
 5. Expands step parameter spaces into farm tasks.
+6. Preserves OpenJD `hostRequirements` as scheduler requirements.
 
 The worker:
 
 1. Creates an OpenJD session.
 2. Enters job and step environments.
 3. Runs each OpenJD task through `openjd-sessions`.
-4. Captures stdout/status and reports the result to the controller.
+4. Streams OpenJD action status/progress callbacks and captures stdout/stderr.
 5. Exits environments and cleans the session directory.
 
 Supported current extensions default to all extensions known by `openjd-model`: `EXPR`, `FEATURE_BUNDLE_1`, `TASK_CHUNKING`, and `REDACTED_ENV_VARS`.
+
+For a routing-focused example, see `examples/openjd_host_requirements.yaml`.
 
 ## Dashboard
 
