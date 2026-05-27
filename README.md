@@ -33,7 +33,7 @@ python -m maturin build --release -o target\wheels
 The wheel filename should contain `cp37-abi3`, for example:
 
 ```text
-renderacre-0.1.2-cp37-abi3-win_amd64.whl
+renderacre-0.1.3-cp37-abi3-win_amd64.whl
 ```
 
 ## Run a Local Farm

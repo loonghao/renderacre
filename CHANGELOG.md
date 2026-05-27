@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Limit PyPI publishing to Python wheels and source distribution artifacts.
+- Checkout sources before creating GitHub Releases from annotated tag notes.
+
 ## 0.1.2
 
 - Move macOS Intel release jobs to GitHub's current `macos-15-intel` runner label.
