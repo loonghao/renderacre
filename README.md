@@ -99,6 +99,13 @@ Start the controller:
 cargo run -p renderacre-controller -- --bind 127.0.0.1:7878
 ```
 
+The controller defaults to the in-memory scheduler for demos and tests. Use the
+SQLite backend for a lightweight durable farm:
+
+```powershell
+cargo run -p renderacre-controller -- --storage sqlite --sqlite-path .\renderacre.sqlite3
+```
+
 Start a worker:
 
 ```powershell
@@ -254,7 +261,12 @@ Recommended first deployment shape:
 - Keep render executables and scripts on shared storage, then pass `PATH` parameters through OpenJD.
 - Use GitHub Releases or PyPI to distribute the `renderacre` wheel to submitter machines.
 
-Current storage is in-memory by design for the first protocol slice. The scheduler boundary is isolated so SQLite/Postgres/NATS can replace it without changing the Python or REST APIs.
+SQLite is the default durable profile for small deployments. Start the
+controller with `--storage sqlite --sqlite-path <path>` or set
+`RFARM_STORAGE=sqlite` and `RFARM_SQLITE_PATH`. The scheduler API remains the
+same for REST workers, dashboard reads, and Python submitters; future Postgres
+or managed/cloud storage backends can replace the same storage boundary without
+changing submitter contracts.
 
 ## Release
 

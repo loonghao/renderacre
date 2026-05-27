@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -26,6 +29,8 @@ pub enum FarmError {
     InvalidLease,
     #[error("scheduler lock was poisoned")]
     LockPoisoned,
+    #[error("scheduler storage failed: {0}")]
+    Storage(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,7 +52,7 @@ impl Default for SchedulerConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SchedulerState {
     jobs: HashMap<JobId, Job>,
     workers: HashMap<WorkerId, WorkerInfo>,
@@ -59,6 +64,24 @@ impl InMemoryScheduler {
             inner: Arc::default(),
             config,
         }
+    }
+
+    fn from_state(state: SchedulerState, config: SchedulerConfig) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(state)),
+            config,
+        }
+    }
+
+    fn state_snapshot(&self) -> Result<SchedulerState, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        Ok(state.clone())
+    }
+
+    fn replace_state(&self, replacement: SchedulerState) -> Result<(), FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        *state = replacement;
+        Ok(())
     }
 
     pub fn submit_job(&self, submission: JobSubmit) -> Result<Job, FarmError> {
@@ -332,6 +355,161 @@ impl InMemoryScheduler {
     fn lease_ttl(&self) -> Duration {
         Duration::seconds(self.config.lease_ttl_seconds.max(1))
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteScheduler {
+    inner: InMemoryScheduler,
+    database_path: Arc<PathBuf>,
+    persist_lock: Arc<Mutex<()>>,
+}
+
+impl SqliteScheduler {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, FarmError> {
+        Self::open_with_config(path, SchedulerConfig::default())
+    }
+
+    pub fn open_with_config(
+        path: impl AsRef<Path>,
+        config: SchedulerConfig,
+    ) -> Result<Self, FarmError> {
+        let database_path = Arc::new(path.as_ref().to_path_buf());
+        let connection = Connection::open(database_path.as_ref()).map_err(storage_error)?;
+        initialize_sqlite(&connection)?;
+        let state = load_sqlite_state(&connection)?;
+        Ok(Self {
+            inner: InMemoryScheduler::from_state(state, config),
+            database_path,
+            persist_lock: Arc::default(),
+        })
+    }
+
+    pub fn submit_job(&self, submission: JobSubmit) -> Result<Job, FarmError> {
+        self.write_durably(|inner| inner.submit_job(submission))
+    }
+
+    pub fn get_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        self.inner.get_job(job_id)
+    }
+
+    pub fn list_jobs(&self) -> Result<Vec<Job>, FarmError> {
+        self.inner.list_jobs()
+    }
+
+    pub fn list_workers(&self) -> Result<Vec<WorkerInfo>, FarmError> {
+        self.inner.list_workers()
+    }
+
+    pub fn dashboard_snapshot(&self) -> Result<DashboardSnapshot, FarmError> {
+        self.inner.dashboard_snapshot()
+    }
+
+    pub fn register_worker(&self, registration: WorkerRegister) -> Result<WorkerInfo, FarmError> {
+        self.write_durably(|inner| inner.register_worker(registration))
+    }
+
+    pub fn heartbeat_worker(&self, worker_id: WorkerId) -> Result<WorkerInfo, FarmError> {
+        self.write_durably(|inner| inner.heartbeat_worker(worker_id))
+    }
+
+    pub fn lease_task(&self, worker_id: WorkerId) -> Result<Option<TaskLease>, FarmError> {
+        self.write_durably(|inner| inner.lease_task(worker_id))
+    }
+
+    pub fn mark_task_started(
+        &self,
+        task_id: TaskId,
+        started: TaskStarted,
+    ) -> Result<Task, FarmError> {
+        self.write_durably(|inner| inner.mark_task_started(task_id, started))
+    }
+
+    pub fn renew_task_lease(
+        &self,
+        task_id: TaskId,
+        renewal: TaskLeaseRenewal,
+    ) -> Result<Task, FarmError> {
+        self.write_durably(|inner| inner.renew_task_lease(task_id, renewal))
+    }
+
+    pub fn complete_task(
+        &self,
+        task_id: TaskId,
+        completion: TaskComplete,
+    ) -> Result<Task, FarmError> {
+        self.write_durably(|inner| inner.complete_task(task_id, completion))
+    }
+
+    fn write_durably<T>(
+        &self,
+        operation: impl FnOnce(&InMemoryScheduler) -> Result<T, FarmError>,
+    ) -> Result<T, FarmError> {
+        let previous = self.inner.state_snapshot()?;
+        let value = operation(&self.inner)?;
+        if let Err(error) = self.persist() {
+            self.inner.replace_state(previous)?;
+            return Err(error);
+        }
+        Ok(value)
+    }
+
+    fn persist(&self) -> Result<(), FarmError> {
+        let _guard = self
+            .persist_lock
+            .lock()
+            .map_err(|_| FarmError::LockPoisoned)?;
+        let state = self.inner.state_snapshot()?;
+        let connection = Connection::open(self.database_path.as_ref()).map_err(storage_error)?;
+        save_sqlite_state(&connection, &state)
+    }
+}
+
+fn initialize_sqlite(connection: &Connection) -> Result<(), FarmError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS scheduler_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                state_json TEXT NOT NULL
+            );",
+        )
+        .map_err(storage_error)?;
+    let state_exists = connection
+        .query_row("SELECT 1 FROM scheduler_state WHERE id = 1", [], |_| Ok(()))
+        .optional()
+        .map_err(storage_error)?
+        .is_some();
+    if !state_exists {
+        save_sqlite_state(connection, &SchedulerState::default())?;
+    }
+    Ok(())
+}
+
+fn load_sqlite_state(connection: &Connection) -> Result<SchedulerState, FarmError> {
+    let state_json: String = connection
+        .query_row(
+            "SELECT state_json FROM scheduler_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    serde_json::from_str(&state_json).map_err(storage_error)
+}
+
+fn save_sqlite_state(connection: &Connection, state: &SchedulerState) -> Result<(), FarmError> {
+    let state_json = serde_json::to_string(state).map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO scheduler_state (id, state_json)
+             VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
+            params![state_json],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn storage_error(error: impl std::fmt::Display) -> FarmError {
+    FarmError::Storage(error.to_string())
 }
 
 fn task_from_submit(
@@ -658,6 +836,113 @@ mod tests {
         assert!(matches!(result, Err(FarmError::InvalidLease)));
     }
 
+    #[test]
+    fn sqlite_scheduler_restores_jobs_workers_and_retry_state() {
+        let database_path = temp_database_path();
+        let scheduler = SqliteScheduler::open(&database_path).expect("sqlite should open");
+        let job = scheduler
+            .submit_job(JobSubmit {
+                name: "durable-demo".to_string(),
+                priority: 5,
+                max_retries: 2,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    max_retries: None,
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "render-node-01".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity { slots: 2 },
+            })
+            .expect("worker should register");
+        let lease = scheduler
+            .lease_task(worker.id)
+            .expect("lease should work")
+            .expect("a task should be leased");
+        scheduler
+            .complete_task(
+                lease.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token,
+                    exit_code: 1,
+                    stdout_tail: Some("stdout".to_string()),
+                    stderr_tail: Some("stderr".to_string()),
+                },
+            )
+            .expect("failed task should requeue");
+
+        let reopened = SqliteScheduler::open(&database_path).expect("sqlite should reopen");
+        let restored = reopened.get_job(job.id).expect("job should be durable");
+        assert_eq!(restored.priority, 5);
+        assert_eq!(restored.tasks[0].attempts, 1);
+        assert_eq!(restored.tasks[0].state, TaskState::Pending);
+        assert_eq!(restored.tasks[0].stdout_tail.as_deref(), Some("stdout"));
+        assert_eq!(reopened.list_workers().unwrap()[0].name, "render-node-01");
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn sqlite_scheduler_recovers_expired_leases_after_restart() {
+        let database_path = temp_database_path();
+        let scheduler = SqliteScheduler::open(&database_path).expect("sqlite should open");
+        scheduler
+            .submit_job(JobSubmit {
+                name: "lease-recovery".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    max_retries: None,
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "worker".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register");
+        let lease = scheduler
+            .lease_task(worker.id)
+            .expect("lease should work")
+            .expect("a task should be leased");
+
+        {
+            let mut state = scheduler.inner.inner.lock().unwrap();
+            let job = state.jobs.values_mut().next().unwrap();
+            let task = job
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == lease.task.id)
+                .unwrap();
+            task.state = TaskState::Running;
+            task.lease.as_mut().unwrap().expires_at = Utc::now() - Duration::seconds(1);
+        }
+        scheduler.persist().expect("expired state should persist");
+
+        let reopened = SqliteScheduler::open(&database_path).expect("sqlite should reopen");
+        let recovered = reopened
+            .lease_task(worker.id)
+            .expect("lease should recover expired work")
+            .expect("expired task should be available again");
+        assert_eq!(recovered.task.id, lease.task.id);
+        assert_eq!(recovered.task.attempts, 2);
+        let _ = std::fs::remove_file(database_path);
+    }
+
     fn command(executable: &str) -> CommandSpec {
         CommandSpec {
             executable: executable.to_string(),
@@ -698,5 +983,9 @@ mod tests {
             .lease_task(worker_id)
             .expect("lease should work")
             .expect("a task should be leased")
+    }
+
+    fn temp_database_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("renderacre-{}.sqlite3", Uuid::new_v4()))
     }
 }

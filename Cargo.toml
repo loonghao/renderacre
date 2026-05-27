@@ -27,6 +27,7 @@ openjd-model = "0.2.0"
 openjd-sessions = "0.2.2"
 pyo3 = { version = "0.27", features = ["abi3-py37"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

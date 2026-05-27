@@ -12,6 +12,7 @@ homepage.workspace = true
 chrono.workspace = true
 openjd-expr.workspace = true
 openjd-model.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
