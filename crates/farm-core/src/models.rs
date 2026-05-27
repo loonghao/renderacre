@@ -35,11 +35,21 @@ pub struct TaskSubmit {
     #[serde(default)]
     pub dependencies: Vec<String>,
     #[serde(default)]
+    pub requirements: TaskRequirements,
+    #[serde(default)]
     pub max_retries: Option<u32>,
     #[serde(default)]
     pub artifact_paths: Vec<PathBuf>,
     #[serde(default)]
     pub openjd: Option<OpenJdRuntimeTask>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskRequirements {
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub pools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +440,8 @@ pub struct Task {
     pub state: TaskState,
     pub command: CommandSpec,
     pub dependencies: Vec<TaskId>,
+    #[serde(default)]
+    pub requirements: TaskRequirements,
     pub attempts: u32,
     pub max_retries: u32,
     pub lease: Option<TaskLeaseInfo>,

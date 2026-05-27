@@ -210,6 +210,7 @@ fn expand_openjd_tasks(
                 name: task_name,
                 command,
                 dependencies,
+                requirements: Default::default(),
                 max_retries: None,
                 artifact_paths: infer_artifact_paths(&job_parameters),
                 openjd: Some(openjd),
