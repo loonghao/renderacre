@@ -69,7 +69,7 @@ cargo install --path crates/farm-worker --locked
 
 - Rust HTTP controller with job submission, worker registration, leasing, retries, task dependencies, and job state inspection.
 - Standalone worker binary that executes direct commands or OpenJD runtime payloads.
-- Controller-collected worker logs, controller events, task stdout/stderr tails, and downloadable task artifacts.
+- Controller-collected worker logs, controller events, task stdout/stderr tails, downloadable task artifacts, and upstream/downstream task dependency tracking.
 - Official `openjd-model` validation and job creation for OpenJD `jobtemplate-2023-09`.
 - Official `openjd-sessions` execution for OpenJD step scripts, task parameters, environments, embedded files, and OpenJD stdout directives.
 - PyO3/maturin Python module for pipeline submitters and DCC tools.
@@ -184,7 +184,7 @@ Supported current extensions default to all extensions known by `openjd-model`: 
 
 ## Dashboard
 
-Renderacre includes a Vite + React dashboard under `dashboard/`. It uses shadcn-style components, compact queue tables, worker status panels, per-worker live logs, an OpenJD task inspector, downloadable artifacts, and stdout/stderr tail views.
+Renderacre includes a Vite + React dashboard under `dashboard/`. It uses modular React components, compact queue tables, worker status panels, per-worker live logs, an OpenJD task inspector, React Flow dependency graphs, downloadable artifacts, and stdout/stderr tail views.
 
 ![Renderacre dashboard queue preview](docs/images/renderacre-dashboard.png)
 

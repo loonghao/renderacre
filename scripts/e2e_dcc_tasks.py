@@ -304,11 +304,77 @@ def run_python_job(repo, port, run_dir, python_exe):
     direct_final = require_success(port, direct["id"], "python-direct")
     require_artifacts(port, direct_final, min_count=1)
     require_worker_logs(port, ["python direct artifact task done"])
+    dependency_final = run_dependency_job(port, executable, run_dir)
     return {
         "name": "python",
         "job_id": final["id"],
-        "tasks": len(final["tasks"]) + len(direct_final["tasks"]),
+        "tasks": len(final["tasks"]) + len(direct_final["tasks"]) + len(dependency_final["tasks"]),
     }
+
+
+def run_dependency_job(port, executable, run_dir):
+    dependency_dir = clean_dir(run_dir / "python-dependencies")
+    order_file = dependency_dir / "dependency_order.txt"
+
+    def task_code(label, required):
+        return "\n".join(
+            [
+                "from pathlib import Path",
+                "path = Path({0!r})".format(str(order_file)),
+                "path.parent.mkdir(parents=True, exist_ok=True)",
+                "existing = path.read_text(encoding='utf-8').splitlines() if path.exists() else []",
+                "required = {0!r}".format(required),
+                "missing = [item for item in required if item not in existing]",
+                "if missing: raise SystemExit('missing upstream tasks before {0}: ' + ', '.join(missing))".format(label),
+                "with path.open('a', encoding='utf-8') as handle: handle.write({0!r} + '\\n')".format(label),
+                "print('dependency task {0} done', flush=True)".format(label),
+            ]
+        )
+
+    dependency = submit_job(
+        port,
+        {
+            "name": "e2e-python-dependency-workflow",
+            "tasks": [
+                {
+                    "name": "prepare",
+                    "command": {"executable": executable, "args": ["-c", task_code("prepare", [])]},
+                },
+                {
+                    "name": "cache",
+                    "dependencies": ["prepare"],
+                    "command": {"executable": executable, "args": ["-c", task_code("cache", ["prepare"])]},
+                },
+                {
+                    "name": "render-a",
+                    "dependencies": ["cache"],
+                    "command": {"executable": executable, "args": ["-c", task_code("render-a", ["prepare", "cache"])]},
+                },
+                {
+                    "name": "render-b",
+                    "dependencies": ["cache"],
+                    "command": {"executable": executable, "args": ["-c", task_code("render-b", ["prepare", "cache"])]},
+                },
+                {
+                    "name": "publish",
+                    "dependencies": ["render-a", "render-b"],
+                    "command": {
+                        "executable": executable,
+                        "args": ["-c", task_code("publish", ["prepare", "cache", "render-a", "render-b"])],
+                    },
+                    "artifact_paths": [str(dependency_dir)],
+                },
+            ],
+        },
+    )
+    final = require_success(port, dependency["id"], "python-dependency")
+    require_dependency_graph(final)
+    require_artifacts(port, final, min_count=1)
+    require_worker_logs(port, ["dependency task publish done"])
+    order = order_file.read_text(encoding="utf-8").splitlines()
+    if order[-1] != "publish":
+        raise AssertionError("publish should be the final dependency task, got order: {0}".format(order))
+    return final
 
 
 def run_blender_job(repo, port, run_dir, blender_exe):
@@ -416,6 +482,30 @@ def require_artifacts(port, job, min_count, png=False):
         )
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise AssertionError("artifact is not a PNG: {0}".format(artifact))
+
+
+def require_dependency_graph(job):
+    tasks = {task["name"]: task for task in job.get("tasks", [])}
+    required = {"prepare", "cache", "render-a", "render-b", "publish"}
+    if set(tasks) != required:
+        raise AssertionError("dependency job tasks did not match: {0}".format(sorted(tasks)))
+    expected = {
+        "prepare": set(),
+        "cache": {tasks["prepare"]["id"]},
+        "render-a": {tasks["cache"]["id"]},
+        "render-b": {tasks["cache"]["id"]},
+        "publish": {tasks["render-a"]["id"], tasks["render-b"]["id"]},
+    }
+    for name, dependency_ids in expected.items():
+        actual = set(tasks[name].get("dependencies", []))
+        if actual != dependency_ids:
+            raise AssertionError(
+                "task {0} dependencies mismatch: expected {1}, got {2}".format(
+                    name,
+                    sorted(dependency_ids),
+                    sorted(actual),
+                )
+            )
 
 
 def clean_dir(path):
