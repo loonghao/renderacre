@@ -69,7 +69,8 @@ export function normalizeSnapshot(data: Partial<DashboardSnapshot>): DashboardSn
     stats: data.stats ?? sampleSnapshot.stats,
     jobs: data.jobs ?? [],
     workers: data.workers ?? [],
-    logs: data.logs ?? []
+    logs: data.logs ?? [],
+    limits: data.limits ?? []
   };
 }
 

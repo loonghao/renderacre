@@ -10,8 +10,9 @@ use axum::{Json, Router};
 use clap::{Parser, ValueEnum};
 use farm_core::{
     DashboardSnapshot, FarmError, FarmLogEntry, FarmStats, InMemoryScheduler, Job, JobId,
-    JobPriorityUpdate, JobSubmit, SchedulerConfig, SqliteScheduler, Task, TaskComplete, TaskId,
-    TaskLease, TaskLeaseRenewal, TaskStarted, WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister,
+    JobPriorityUpdate, JobSubmit, ResourceLimitDefinition, ResourceLimitSnapshot, SchedulerConfig,
+    SqliteScheduler, Task, TaskComplete, TaskId, TaskLease, TaskLeaseRenewal, TaskStarted,
+    WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister,
 };
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -99,6 +100,23 @@ impl AppScheduler {
         match self {
             Self::Memory(scheduler) => scheduler.record_worker_logs(worker_id, batch),
             Self::Sqlite(scheduler) => scheduler.record_worker_logs(worker_id, batch),
+        }
+    }
+
+    fn define_limit(
+        &self,
+        definition: ResourceLimitDefinition,
+    ) -> Result<ResourceLimitSnapshot, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.define_limit(definition),
+            Self::Sqlite(scheduler) => scheduler.define_limit(definition),
+        }
+    }
+
+    fn list_limits(&self) -> Result<Vec<ResourceLimitSnapshot>, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.list_limits(),
+            Self::Sqlite(scheduler) => scheduler.list_limits(),
         }
     }
 
@@ -234,6 +252,7 @@ fn app(scheduler: AppScheduler) -> Router {
         .route("/v1/dashboard", get(get_dashboard))
         .route("/v1/logs", get(list_logs))
         .route("/v1/stats", get(get_stats))
+        .route("/v1/limits", get(list_limits).post(define_limit))
         .route("/v1/jobs", get(list_jobs).post(submit_job))
         .route("/v1/jobs/{job_id}", get(get_job))
         .route("/v1/jobs/{job_id}/pause", post(pause_job))
@@ -335,6 +354,19 @@ async fn list_logs(
     State(scheduler): State<AppScheduler>,
 ) -> Result<Json<Vec<FarmLogEntry>>, ApiError> {
     Ok(Json(scheduler.list_logs()?))
+}
+
+async fn define_limit(
+    State(scheduler): State<AppScheduler>,
+    Json(definition): Json<ResourceLimitDefinition>,
+) -> Result<Json<ResourceLimitSnapshot>, ApiError> {
+    Ok(Json(scheduler.define_limit(definition)?))
+}
+
+async fn list_limits(
+    State(scheduler): State<AppScheduler>,
+) -> Result<Json<Vec<ResourceLimitSnapshot>>, ApiError> {
+    Ok(Json(scheduler.list_limits()?))
 }
 
 async fn register_worker(

@@ -29,6 +29,8 @@ Core endpoints:
 - `POST /v1/jobs/{job_id}/priority`: update queue priority.
 - `POST /v1/tasks/{task_id}/cancel`: cancel a selected task.
 - `POST /v1/tasks/{task_id}/requeue`: retry or requeue a selected task.
+- `GET /v1/limits`: inspect shared resource and license usage.
+- `POST /v1/limits`: define a named shared resource limit.
 - `POST /v1/tasks/{task_id}/started`: mark a leased task as running.
 - `POST /v1/tasks/{task_id}/renew`: extend a healthy in-flight task lease.
 - `POST /v1/tasks/{task_id}/complete`: report result and trigger retry/final state.
@@ -52,6 +54,13 @@ standard attribute capabilities are read from worker labels.
 
 Lifecycle actions are idempotent where repeating the same request is safe, and
 invalid state transitions return a conflict response with a descriptive error.
+
+Shared resource limits are named scheduler constraints for scarce farm-wide
+capacity such as floating DCC licenses, GPU partitions, or heavy caches. Tasks
+can request limits by name; undefined or exhausted limits block otherwise
+runnable tasks until usage is released by completion, cancellation, requeue, or
+lease expiry. Limit snapshots are exposed in the dashboard payload and the
+dedicated `/v1/limits` API.
 
 ## OpenJD path
 

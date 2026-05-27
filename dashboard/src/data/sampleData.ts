@@ -45,6 +45,10 @@ export const sampleSnapshot: DashboardSnapshot = {
     sampleLog("log-03", "info", "worker", "[INFO] Rendering tiles on GPU", "job-01", "job-01-task-5", "worker-07", "stdout"),
     sampleLog("log-04", "error", "worker", "[ERROR] renderer returned exit code 1", "job-07", "job-07-task-0", "worker-12", "stderr")
   ],
+  limits: [
+    { name: "maya", max_count: 8, used: 3, available: 5 },
+    { name: "gpu", max_count: 24, used: 11, available: 13 }
+  ],
   jobs: [
     sampleJob("job-01", "Shot_010_Lighting_v003", "running", 75, "Blender 4.1", "Lighting", 78),
     sampleJob("job-02", "Shot_010_Comp_v002", "running", 50, "Nuke 15.2", "Comp", 42),

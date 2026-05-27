@@ -37,6 +37,8 @@ pub struct TaskSubmit {
     #[serde(default)]
     pub requirements: TaskRequirements,
     #[serde(default)]
+    pub limits: Vec<String>,
+    #[serde(default)]
     pub max_retries: Option<u32>,
     #[serde(default)]
     pub artifact_paths: Vec<PathBuf>,
@@ -431,6 +433,8 @@ pub struct DashboardSnapshot {
     pub jobs: Vec<Job>,
     pub workers: Vec<WorkerInfo>,
     pub logs: Vec<FarmLogEntry>,
+    #[serde(default)]
+    pub limits: Vec<ResourceLimitSnapshot>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -468,6 +472,8 @@ pub struct Task {
     pub dependencies: Vec<TaskId>,
     #[serde(default)]
     pub requirements: TaskRequirements,
+    #[serde(default)]
+    pub limits: Vec<String>,
     pub attempts: u32,
     pub max_retries: u32,
     pub lease: Option<TaskLeaseInfo>,
@@ -608,6 +614,20 @@ pub enum LogSource {
     Controller,
     Worker,
     Task,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimitDefinition {
+    pub name: String,
+    pub max_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimitSnapshot {
+    pub name: String,
+    pub max_count: u32,
+    pub used: u32,
+    pub available: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
