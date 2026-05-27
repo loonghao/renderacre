@@ -34,6 +34,8 @@ Core endpoints:
 - `POST /v1/tasks/{task_id}/started`: mark a leased task as running.
 - `POST /v1/tasks/{task_id}/renew`: extend a healthy in-flight task lease.
 - `POST /v1/tasks/{task_id}/complete`: report result and trigger retry/final state.
+- `GET /v1/tasks/{task_id}/attempts/{attempt_id}/logs`: read logs for one durable attempt record.
+- `GET /v1/tasks/{task_id}/artifacts/{artifact_index}`: download a captured task artifact.
 
 Task leases have a configurable controller-side TTL. Workers renew leases while
 direct command and OpenJD tasks are still executing, so long-running work is not
@@ -103,9 +105,25 @@ SQLite persists submitted jobs, task attempts, leases, worker registrations, and
 dashboard history needed for normal queue recovery. Expired leases are recovered
 when workers resume leasing after a controller restart.
 
+## Logs and artifacts
+
+The scheduler owns durable attempt metadata: each leased execution receives a
+stable attempt id, worker identity, timing, exit code, concise failure summary,
+stdout/stderr tails, artifact metadata, and a `log_ref` that resolves through
+the controller API. Worker output is accepted as structured log batches and
+attached to the active attempt when a task id is present, so running tasks can
+show near-live stdout/stderr while completed attempts keep their own record.
+
+The first artifact implementation records filesystem paths and serves readable
+files through the controller. Workers can discover artifacts from submitted
+artifact paths, modified files under output directories, and
+`RENDERACRE_ARTIFACT=...` stdout/stderr directives. Future object storage
+backends should preserve the same task artifact contract while replacing only
+the path resolution and byte-serving implementation.
+
 ## Dashboard path
 
-`dashboard/` is a Vite React application for queue operations. It reads `/v1/dashboard`, `/v1/jobs`, `/v1/workers`, and `/v1/stats`, then renders a Deadline-style queue table, worker assignment panel, OpenJD step detail, dependency mini graph, and stdout tail. During local development Vite proxies `/v1` to the controller; in deployment, serve the built static assets from `dashboard/dist` beside the controller API.
+`dashboard/` is a Vite React application for queue operations. It reads `/v1/dashboard`, `/v1/jobs`, `/v1/workers`, and `/v1/stats`, then renders a Deadline-style queue table, worker assignment panel, OpenJD step detail, dependency mini graph, attempt history, artifacts, and stdout/stderr tails. During local development Vite proxies `/v1` to the controller; in deployment, serve the built static assets from `dashboard/dist` beside the controller API.
 
 ## Release assets
 

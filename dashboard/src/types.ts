@@ -2,9 +2,10 @@ import type { ReactNode } from "react";
 import type { Node } from "@xyflow/react";
 
 export type View = "queue" | "workers" | "openjd" | "logs" | "settings";
-export type InspectorTab = "overview" | "workflow" | "tasks" | "artifacts" | "logs";
+export type InspectorTab = "overview" | "workflow" | "tasks" | "attempts" | "artifacts" | "logs";
 export type JobState = "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled";
 export type TaskState = "pending" | "leased" | "running" | "succeeded" | "failed" | "cancelled";
+export type TaskAttemptState = "leased" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
 export type JobAction = "pause" | "resume" | "cancel" | "priority";
 export type TaskAction = "cancel" | "requeue";
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -16,6 +17,22 @@ export interface ApiArtifact {
   size_bytes: number;
   kind: "image" | "scene" | "log" | "file";
   modified_at?: string | null;
+}
+
+export interface ApiTaskAttempt {
+  id: string;
+  number: number;
+  worker_id: string;
+  state: TaskAttemptState;
+  leased_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  exit_code?: number | null;
+  stdout_tail?: string | null;
+  stderr_tail?: string | null;
+  failure_summary?: string | null;
+  log_ref: string;
+  artifacts?: ApiArtifact[];
 }
 
 export interface ApiAmountRequirement {
@@ -50,9 +67,11 @@ export interface ApiTask {
   artifacts?: ApiArtifact[];
   lease?: {
     worker_id: string;
+    attempt_id?: string;
     leased_at: string;
     expires_at: string;
   } | null;
+  attempt_records?: ApiTaskAttempt[];
   openjd?: {
     step_name: string;
     task_parameters?: Record<string, { value: unknown }>;
@@ -91,6 +110,7 @@ export interface FarmLog {
   message: string;
   job_id?: string | null;
   task_id?: string | null;
+  attempt_id?: string | null;
   worker_id?: string | null;
 }
 

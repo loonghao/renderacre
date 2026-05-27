@@ -79,7 +79,7 @@ export function isView(value: string): value is View {
 }
 
 function isInspectorTab(value: string): value is InspectorTab {
-  return ["overview", "workflow", "tasks", "artifacts", "logs"].includes(value);
+  return ["overview", "workflow", "tasks", "attempts", "artifacts", "logs"].includes(value);
 }
 
 export function tabLabel(tab: InspectorTab) {
@@ -87,6 +87,7 @@ export function tabLabel(tab: InspectorTab) {
     overview: "Overview",
     workflow: "Workflow",
     tasks: "Tasks",
+    attempts: "Attempts",
     artifacts: "Artifacts",
     logs: "Logs"
   }[tab];

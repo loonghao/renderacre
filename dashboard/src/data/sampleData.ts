@@ -41,9 +41,9 @@ export const sampleSnapshot: DashboardSnapshot = {
   ],
   logs: [
     sampleLog("log-01", "info", "controller", "job submitted: Shot_010_Lighting_v003", "job-01"),
-    sampleLog("log-02", "info", "worker", "starting task Lighting_006", "job-01", "job-01-task-5", "worker-07", "worker"),
-    sampleLog("log-03", "info", "worker", "[INFO] Rendering tiles on GPU", "job-01", "job-01-task-5", "worker-07", "stdout"),
-    sampleLog("log-04", "error", "worker", "[ERROR] renderer returned exit code 1", "job-07", "job-07-task-0", "worker-12", "stderr")
+    sampleLog("log-02", "info", "worker", "starting task Lighting_006", "job-01", "job-01-task-5", "job-01-task-5-attempt-1", "worker-07", "worker"),
+    sampleLog("log-03", "info", "worker", "[INFO] Rendering tiles on GPU", "job-01", "job-01-task-5", "job-01-task-5-attempt-1", "worker-07", "stdout"),
+    sampleLog("log-04", "error", "worker", "[ERROR] renderer returned exit code 1", "job-07", "job-07-task-0", "job-07-task-0-attempt-1", "worker-12", "stderr")
   ],
   limits: [
     { name: "maya", max_count: 8, used: 3, available: 5 },
@@ -90,6 +90,8 @@ function sampleJob(
     updated_at: "2026-05-27T09:25:10Z",
     tasks: taskIds.map((taskId, index) => {
       const done = index < succeeded;
+      const attemptId = `${taskId}-attempt-1`;
+      const hasAttempt = done || (state === "failed" && index === succeeded) || (state === "running" && index === succeeded);
       return {
         id: taskId,
         name: `${step}_${String(index + 1).padStart(3, "0")}`,
@@ -117,7 +119,41 @@ function sampleJob(
               }
             ]
           : [],
-        lease: state === "running" && index === succeeded ? { worker_id: "worker-07", leased_at: "2026-05-27T09:18:01Z", expires_at: "2026-05-27T09:28:01Z" } : null,
+        lease: state === "running" && index === succeeded ? { worker_id: "worker-07", attempt_id: attemptId, leased_at: "2026-05-27T09:18:01Z", expires_at: "2026-05-27T09:28:01Z" } : null,
+        attempt_records: hasAttempt
+          ? [
+              {
+                id: attemptId,
+                number: 1,
+                worker_id: state === "failed" ? "worker-12" : "worker-07",
+                state:
+                  state === "failed" && index === succeeded
+                    ? "failed"
+                    : state === "running" && index === succeeded
+                      ? "running"
+                      : "succeeded",
+                leased_at: "2026-05-27T09:18:01Z",
+                started_at: "2026-05-27T09:18:04Z",
+                completed_at: done ? "2026-05-27T09:24:10Z" : null,
+                exit_code: state === "failed" && index === succeeded ? 1 : done ? 0 : null,
+                stdout_tail: done ? "RENDERACRE_ARTIFACT=//show/render/frame.png\n[INFO] Render complete" : null,
+                stderr_tail: state === "failed" && index === succeeded ? "[ERROR] renderer returned exit code 1" : null,
+                failure_summary: state === "failed" && index === succeeded ? "[ERROR] renderer returned exit code 1" : null,
+                log_ref: `/v1/tasks/${taskId}/attempts/${attemptId}/logs`,
+                artifacts: done
+                  ? [
+                      {
+                        name: `${name}_${1001 + index}.png`,
+                        path: `//show/render/${name}_${1001 + index}.png`,
+                        size_bytes: 182044,
+                        kind: "image",
+                        modified_at: "2026-05-27T09:24:10Z"
+                      }
+                    ]
+                  : []
+              }
+            ]
+          : [],
         openjd: {
           step_name: step,
           task_parameters: {
@@ -144,6 +180,7 @@ function sampleLog(
   message: string,
   jobId?: string,
   taskId?: string,
+  attemptId?: string,
   workerId?: string,
   stream?: string
 ): FarmLog {
@@ -156,6 +193,7 @@ function sampleLog(
     message,
     job_id: jobId,
     task_id: taskId,
+    attempt_id: attemptId,
     worker_id: workerId
   };
 }

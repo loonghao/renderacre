@@ -70,6 +70,7 @@ impl WorkerLogSink {
             message,
             job_id,
             task_id,
+            attempt_id: None,
         }])
         .await;
     }
@@ -91,6 +92,7 @@ impl WorkerLogSink {
                 message: line.to_string(),
                 job_id: Some(job_id),
                 task_id: Some(task_id),
+                attempt_id: None,
             })
             .collect::<Vec<_>>();
         self.post_batch(entries).await;

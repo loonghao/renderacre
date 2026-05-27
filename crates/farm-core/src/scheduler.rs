@@ -11,9 +11,9 @@ use uuid::Uuid;
 use crate::models::{
     DashboardSnapshot, FarmLogEntry, FarmStats, Job, JobId, JobState, JobSubmit, LogLevel,
     LogSource, OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition,
-    ResourceLimitSnapshot, Task, TaskArtifact, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
-    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo,
-    WorkerLogBatch, WorkerRegister, WorkerState,
+    ResourceLimitSnapshot, Task, TaskArtifact, TaskAttempt, TaskAttemptState, TaskComplete, TaskId,
+    TaskLease, TaskLeaseInfo, TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity,
+    WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -30,6 +30,8 @@ pub enum FarmError {
         task_id: TaskId,
         artifact_index: usize,
     },
+    #[error("attempt was not found for task {task_id}: {attempt_id}")]
+    AttemptNotFound { task_id: TaskId, attempt_id: Uuid },
     #[error("invalid submission: {0}")]
     InvalidSubmission(String),
     #[error("invalid state transition: {0}")]
@@ -156,6 +158,7 @@ impl InMemoryScheduler {
                 message: format!("job submitted: {}", job.name),
                 job_id: Some(job.id),
                 task_id: None,
+                attempt_id: None,
                 worker_id: None,
                 stream: None,
             },
@@ -240,6 +243,7 @@ impl InMemoryScheduler {
                 message: format!("worker registered: {}", worker.name),
                 job_id: None,
                 task_id: None,
+                attempt_id: None,
                 worker_id: Some(worker.id),
                 stream: None,
             },
@@ -258,6 +262,11 @@ impl InMemoryScheduler {
         }
         let mut recorded = Vec::new();
         for input in batch.entries {
+            let attempt_id = input.attempt_id.or_else(|| {
+                input
+                    .task_id
+                    .and_then(|task_id| active_attempt_id(&state, task_id))
+            });
             let entry = push_log(
                 &mut state,
                 NewLog {
@@ -266,6 +275,7 @@ impl InMemoryScheduler {
                     message: input.message,
                     job_id: input.job_id,
                     task_id: input.task_id,
+                    attempt_id,
                     worker_id: Some(worker_id),
                     stream: input.stream,
                 },
@@ -273,6 +283,37 @@ impl InMemoryScheduler {
             recorded.push(entry);
         }
         Ok(recorded)
+    }
+
+    pub fn list_task_attempt_logs(
+        &self,
+        task_id: TaskId,
+        attempt_id: Uuid,
+    ) -> Result<Vec<FarmLogEntry>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let (job_id, task_index) = find_task_location(&state, task_id)?;
+        let task = state
+            .jobs
+            .get(&job_id)
+            .and_then(|job| job.tasks.get(task_index))
+            .ok_or(FarmError::TaskNotFound(task_id))?;
+        if !task
+            .attempt_records
+            .iter()
+            .any(|attempt| attempt.id == attempt_id)
+        {
+            return Err(FarmError::AttemptNotFound {
+                task_id,
+                attempt_id,
+            });
+        }
+        Ok(state
+            .logs
+            .iter()
+            .filter(|entry| entry.task_id == Some(task_id))
+            .filter(|entry| entry.attempt_id == Some(attempt_id))
+            .cloned()
+            .collect())
     }
 
     pub fn define_limit(
@@ -376,6 +417,18 @@ impl InMemoryScheduler {
                 task.state = TaskState::Cancelled;
                 task.updated_at = now;
                 task.completed_at = Some(now);
+                finish_current_attempt(
+                    task,
+                    AttemptFinish {
+                        state: TaskAttemptState::Cancelled,
+                        completed_at: now,
+                        exit_code: None,
+                        stdout_tail: None,
+                        stderr_tail: None,
+                        artifacts: Vec::new(),
+                        failure_summary: Some("job cancelled".to_string()),
+                    },
+                );
                 if task.lease.is_none() {
                     task.started_at = None;
                 }
@@ -443,6 +496,7 @@ impl InMemoryScheduler {
             .get_mut(&job_id)
             .ok_or(FarmError::JobNotFound(job_id))?;
         let lease_token = Uuid::new_v4().to_string();
+        let attempt_id = Uuid::new_v4();
         let leased_task = {
             let task = job
                 .tasks
@@ -453,9 +507,26 @@ impl InMemoryScheduler {
             task.state = TaskState::Leased;
             task.attempts += 1;
             task.updated_at = now;
+            let attempt_number = next_attempt_number(task);
+            task.attempt_records.push(TaskAttempt {
+                id: attempt_id,
+                number: attempt_number,
+                worker_id,
+                state: TaskAttemptState::Leased,
+                leased_at: now,
+                started_at: None,
+                completed_at: None,
+                exit_code: None,
+                stdout_tail: None,
+                stderr_tail: None,
+                failure_summary: None,
+                log_ref: attempt_log_ref(task.id, attempt_id),
+                artifacts: Vec::new(),
+            });
             task.lease = Some(TaskLeaseInfo {
                 token: lease_token.clone(),
                 worker_id,
+                attempt_id,
                 leased_at: now,
                 expires_at: now + self.lease_ttl(),
             });
@@ -471,6 +542,7 @@ impl InMemoryScheduler {
                 message: format!("leased task: {task_name}"),
                 job_id: Some(job_id),
                 task_id: Some(task_id),
+                attempt_id: Some(attempt_id),
                 worker_id: Some(worker_id),
                 stream: None,
             },
@@ -495,9 +567,22 @@ impl InMemoryScheduler {
             .ok_or(FarmError::TaskNotFound(task_id))?;
         match task.state {
             TaskState::Pending | TaskState::Leased | TaskState::Running => {
+                let now = Utc::now();
                 task.state = TaskState::Cancelled;
-                task.updated_at = Utc::now();
-                task.completed_at = Some(Utc::now());
+                task.updated_at = now;
+                task.completed_at = Some(now);
+                finish_current_attempt(
+                    task,
+                    AttemptFinish {
+                        state: TaskAttemptState::Cancelled,
+                        completed_at: now,
+                        exit_code: None,
+                        stdout_tail: None,
+                        stderr_tail: None,
+                        artifacts: Vec::new(),
+                        failure_summary: Some("task cancelled".to_string()),
+                    },
+                );
                 if task.lease.is_none() {
                     task.started_at = None;
                 }
@@ -564,9 +649,12 @@ impl InMemoryScheduler {
             .get_mut(task_index)
             .ok_or(FarmError::TaskNotFound(task_id))?;
         validate_lease(task, started.worker_id, &started.lease_token)?;
+        let now = Utc::now();
         task.state = TaskState::Running;
-        task.started_at = Some(Utc::now());
-        task.updated_at = Utc::now();
+        task.started_at = Some(now);
+        task.updated_at = now;
+        start_current_attempt(task, now);
+        let attempt_id = task.lease.as_ref().map(|lease| lease.attempt_id);
         let task = task.clone();
         update_job_state(job);
         push_log(
@@ -577,6 +665,7 @@ impl InMemoryScheduler {
                 message: format!("task started: {}", task.name),
                 job_id: Some(job_id),
                 task_id: Some(task.id),
+                attempt_id,
                 worker_id: Some(started.worker_id),
                 stream: None,
             },
@@ -626,21 +715,36 @@ impl InMemoryScheduler {
             .ok_or(FarmError::TaskNotFound(task_id))?;
         validate_lease(task, completion.worker_id, &completion.lease_token)?;
         let job_was_paused = job.state == JobState::Paused;
+        let attempt_id = task.lease.as_ref().map(|lease| lease.attempt_id);
+        let completed_at = Utc::now();
 
         if task.state == TaskState::Cancelled {
-            task.completed_at = Some(Utc::now());
-            task.updated_at = Utc::now();
+            task.completed_at = Some(completed_at);
+            task.updated_at = completed_at;
+            finish_current_attempt(
+                task,
+                AttemptFinish {
+                    state: TaskAttemptState::Cancelled,
+                    completed_at,
+                    exit_code: Some(completion.exit_code),
+                    stdout_tail: completion.stdout_tail.clone(),
+                    stderr_tail: completion.stderr_tail.clone(),
+                    artifacts: completion.artifacts.clone(),
+                    failure_summary: Some(
+                        "task cancelled before completion was accepted".to_string(),
+                    ),
+                },
+            );
             task.lease = None;
             return Ok(task.clone());
         }
 
-        task.completed_at = Some(Utc::now());
-        task.updated_at = Utc::now();
+        task.completed_at = Some(completed_at);
+        task.updated_at = completed_at;
         task.last_exit_code = Some(completion.exit_code);
-        task.stdout_tail = completion.stdout_tail;
-        task.stderr_tail = completion.stderr_tail;
-        task.artifacts = completion.artifacts;
-        task.lease = None;
+        task.stdout_tail = completion.stdout_tail.clone();
+        task.stderr_tail = completion.stderr_tail.clone();
+        task.artifacts = completion.artifacts.clone();
         task.state = if completion.exit_code == 0 {
             TaskState::Succeeded
         } else if task.attempts <= task.max_retries {
@@ -650,6 +754,27 @@ impl InMemoryScheduler {
         } else {
             TaskState::Failed
         };
+        let attempt_state = if completion.exit_code == 0 {
+            TaskAttemptState::Succeeded
+        } else {
+            TaskAttemptState::Failed
+        };
+        finish_current_attempt(
+            task,
+            AttemptFinish {
+                state: attempt_state,
+                completed_at,
+                exit_code: Some(completion.exit_code),
+                stdout_tail: completion.stdout_tail.clone(),
+                stderr_tail: completion.stderr_tail.clone(),
+                artifacts: completion.artifacts.clone(),
+                failure_summary: failure_summary(
+                    completion.exit_code,
+                    completion.stderr_tail.as_deref(),
+                ),
+            },
+        );
+        task.lease = None;
 
         let task = task.clone();
         update_job_state(job);
@@ -672,6 +797,7 @@ impl InMemoryScheduler {
                 ),
                 job_id: Some(job_id),
                 task_id: Some(task.id),
+                attempt_id,
                 worker_id: Some(completion.worker_id),
                 stream: None,
             },
@@ -758,6 +884,14 @@ impl SqliteScheduler {
 
     pub fn list_worker_logs(&self, worker_id: WorkerId) -> Result<Vec<FarmLogEntry>, FarmError> {
         self.inner.list_worker_logs(worker_id)
+    }
+
+    pub fn list_task_attempt_logs(
+        &self,
+        task_id: TaskId,
+        attempt_id: Uuid,
+    ) -> Result<Vec<FarmLogEntry>, FarmError> {
+        self.inner.list_task_attempt_logs(task_id, attempt_id)
     }
 
     pub fn record_worker_logs(
@@ -970,6 +1104,7 @@ fn task_from_submit(
         last_exit_code: None,
         stdout_tail: None,
         stderr_tail: None,
+        attempt_records: Vec::new(),
     })
 }
 
@@ -985,6 +1120,75 @@ fn active_worker_slots(state: &SchedulerState, worker_id: WorkerId) -> u32 {
                 .is_some_and(|lease| lease.worker_id == worker_id)
         })
         .count() as u32
+}
+
+fn start_current_attempt(task: &mut Task, started_at: chrono::DateTime<Utc>) {
+    let Some(attempt_id) = task.lease.as_ref().map(|lease| lease.attempt_id) else {
+        return;
+    };
+    if let Some(attempt) = task
+        .attempt_records
+        .iter_mut()
+        .rev()
+        .find(|attempt| attempt.id == attempt_id)
+    {
+        attempt.state = TaskAttemptState::Running;
+        attempt.started_at = Some(started_at);
+    }
+}
+
+fn next_attempt_number(task: &Task) -> u32 {
+    task.attempt_records
+        .iter()
+        .map(|attempt| attempt.number)
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+struct AttemptFinish {
+    state: TaskAttemptState,
+    completed_at: chrono::DateTime<Utc>,
+    exit_code: Option<i32>,
+    stdout_tail: Option<String>,
+    stderr_tail: Option<String>,
+    artifacts: Vec<TaskArtifact>,
+    failure_summary: Option<String>,
+}
+
+fn finish_current_attempt(task: &mut Task, finish: AttemptFinish) {
+    let Some(attempt_id) = task.lease.as_ref().map(|lease| lease.attempt_id) else {
+        return;
+    };
+    if let Some(attempt) = task
+        .attempt_records
+        .iter_mut()
+        .rev()
+        .find(|attempt| attempt.id == attempt_id)
+    {
+        attempt.state = finish.state;
+        attempt.completed_at = Some(finish.completed_at);
+        attempt.exit_code = finish.exit_code;
+        attempt.stdout_tail = finish.stdout_tail;
+        attempt.stderr_tail = finish.stderr_tail;
+        attempt.failure_summary = finish.failure_summary;
+        attempt.artifacts = finish.artifacts;
+    }
+}
+
+fn failure_summary(exit_code: i32, stderr_tail: Option<&str>) -> Option<String> {
+    if exit_code == 0 {
+        return None;
+    }
+    let detail = stderr_tail
+        .and_then(|tail| tail.lines().rev().find(|line| !line.trim().is_empty()))
+        .map(|line| line.trim().chars().take(240).collect::<String>())
+        .unwrap_or_else(|| format!("task exited with code {exit_code}"));
+    Some(detail)
+}
+
+fn attempt_log_ref(task_id: TaskId, attempt_id: Uuid) -> String {
+    format!("/v1/tasks/{task_id}/attempts/{attempt_id}/logs")
 }
 
 fn task_matches_worker(
@@ -1185,6 +1389,18 @@ fn expire_old_leases(state: &mut SchedulerState) {
                     .as_ref()
                     .is_some_and(|lease| lease.expires_at < now)
             {
+                finish_current_attempt(
+                    task,
+                    AttemptFinish {
+                        state: TaskAttemptState::Expired,
+                        completed_at: now,
+                        exit_code: None,
+                        stdout_tail: None,
+                        stderr_tail: None,
+                        artifacts: Vec::new(),
+                        failure_summary: Some("lease expired before completion".to_string()),
+                    },
+                );
                 task.state = TaskState::Pending;
                 task.lease = None;
                 task.started_at = None;
@@ -1204,6 +1420,7 @@ struct NewLog {
     message: String,
     job_id: Option<JobId>,
     task_id: Option<TaskId>,
+    attempt_id: Option<Uuid>,
     worker_id: Option<WorkerId>,
     stream: Option<String>,
 }
@@ -1218,6 +1435,7 @@ fn push_log(state: &mut SchedulerState, log: NewLog) -> FarmLogEntry {
         message: log.message,
         job_id: log.job_id,
         task_id: log.task_id,
+        attempt_id: log.attempt_id,
         worker_id: log.worker_id,
     };
     state.logs.push(entry.clone());
@@ -1238,6 +1456,16 @@ fn find_task_location(
         }
     }
     Err(FarmError::TaskNotFound(task_id))
+}
+
+fn active_attempt_id(state: &SchedulerState, task_id: TaskId) -> Option<Uuid> {
+    state
+        .jobs
+        .values()
+        .flat_map(|job| &job.tasks)
+        .find(|task| task.id == task_id)
+        .and_then(|task| task.lease.as_ref())
+        .map(|lease| lease.attempt_id)
 }
 
 fn validate_lease(task: &Task, worker_id: WorkerId, lease_token: &str) -> Result<(), FarmError> {
@@ -1324,8 +1552,10 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
 #[cfg(test)]
 mod tests {
     use crate::models::{
-        CommandSpec, OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition,
-        TaskLease, TaskLeaseRenewal, TaskRequirements, WorkerCapacity, WorkerId, WorkerInfo,
+        ArtifactKind, CommandSpec, LogLevel, OpenJdAmountRequirement, OpenJdAttributeRequirement,
+        ResourceLimitDefinition, TaskArtifact, TaskAttemptState, TaskLease, TaskLeaseRenewal,
+        TaskRequirements, TaskStarted, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch,
+        WorkerLogInput,
     };
 
     use super::*;
@@ -1546,6 +1776,137 @@ mod tests {
         assert_eq!(restored.tasks[0].state, TaskState::Pending);
         assert_eq!(restored.tasks[0].stdout_tail.as_deref(), Some("stdout"));
         assert_eq!(reopened.list_workers().unwrap()[0].name, "render-node-01");
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn task_attempts_keep_failure_details_and_stable_logs() {
+        let scheduler = InMemoryScheduler::default();
+        let worker = register_worker(&scheduler);
+        let lease = lease_single_task(&scheduler, worker.id);
+        let attempt_id = lease.task.lease.as_ref().unwrap().attempt_id;
+
+        scheduler
+            .mark_task_started(
+                lease.task.id,
+                TaskStarted {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token.clone(),
+                },
+            )
+            .expect("task should start");
+        scheduler
+            .record_worker_logs(
+                worker.id,
+                WorkerLogBatch {
+                    entries: vec![WorkerLogInput {
+                        level: LogLevel::Error,
+                        stream: Some("stderr".to_string()),
+                        message: "renderer crashed".to_string(),
+                        job_id: Some(lease.task.job_id),
+                        task_id: Some(lease.task.id),
+                        attempt_id: None,
+                    }],
+                },
+            )
+            .expect("logs should record");
+        scheduler
+            .complete_task(
+                lease.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token,
+                    exit_code: 42,
+                    stdout_tail: Some("started".to_string()),
+                    stderr_tail: Some("renderer crashed".to_string()),
+                    artifacts: vec![TaskArtifact {
+                        name: "failure.log".to_string(),
+                        path: "failure.log".into(),
+                        size_bytes: 12,
+                        kind: ArtifactKind::Log,
+                        modified_at: None,
+                    }],
+                },
+            )
+            .expect("task should complete");
+
+        let task = &scheduler.get_job(lease.task.job_id).unwrap().tasks[0];
+        let attempt = task
+            .attempt_records
+            .first()
+            .expect("attempt should persist");
+        assert_eq!(attempt.id, attempt_id);
+        assert_eq!(attempt.state, TaskAttemptState::Failed);
+        assert_eq!(attempt.exit_code, Some(42));
+        assert_eq!(attempt.worker_id, worker.id);
+        assert_eq!(attempt.failure_summary.as_deref(), Some("renderer crashed"));
+        assert!(attempt.log_ref.ends_with(&format!("/{attempt_id}/logs")));
+        assert_eq!(attempt.artifacts[0].name, "failure.log");
+
+        let attempt_logs = scheduler
+            .list_task_attempt_logs(lease.task.id, attempt_id)
+            .expect("attempt logs should load");
+        assert_eq!(attempt_logs.len(), 4);
+        assert!(attempt_logs
+            .iter()
+            .all(|entry| entry.attempt_id == Some(attempt_id)));
+    }
+
+    #[test]
+    fn sqlite_scheduler_restores_attempt_history() {
+        let database_path = temp_database_path();
+        let scheduler = SqliteScheduler::open(&database_path).expect("sqlite should open");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "durable-worker".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register");
+        let job = scheduler
+            .submit_job(JobSubmit {
+                name: "attempt-history".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    requirements: Default::default(),
+                    limits: Vec::new(),
+                    max_retries: None,
+                    artifact_paths: Vec::new(),
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let lease = scheduler.lease_task(worker.id).unwrap().unwrap();
+        let attempt_id = lease.task.lease.as_ref().unwrap().attempt_id;
+        scheduler
+            .complete_task(
+                lease.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token,
+                    exit_code: 0,
+                    stdout_tail: Some("done".to_string()),
+                    stderr_tail: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .expect("task should complete");
+
+        let reopened = SqliteScheduler::open(&database_path).expect("sqlite should reopen");
+        let restored = reopened.get_job(job.id).expect("job should be durable");
+        let attempt = &restored.tasks[0].attempt_records[0];
+        assert_eq!(attempt.id, attempt_id);
+        assert_eq!(attempt.state, TaskAttemptState::Succeeded);
+        assert_eq!(attempt.stdout_tail.as_deref(), Some("done"));
+        assert_eq!(
+            attempt.log_ref,
+            format!("/v1/tasks/{}/attempts/{attempt_id}/logs", lease.task.id)
+        );
         let _ = std::fs::remove_file(database_path);
     }
 
@@ -1996,6 +2357,9 @@ mod tests {
             TaskState::Pending
         );
         assert_eq!(scheduler.get_job(job.id).unwrap().state, JobState::Queued);
+        let second_lease = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert_eq!(second_lease.task.attempts, 1);
+        assert_eq!(second_lease.task.attempt_records[1].number, 2);
         assert_eq!(
             scheduler.update_job_priority(job.id, 10).unwrap().priority,
             10

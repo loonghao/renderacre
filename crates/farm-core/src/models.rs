@@ -485,6 +485,8 @@ pub struct Task {
     pub stdout_tail: Option<String>,
     pub stderr_tail: Option<String>,
     #[serde(default)]
+    pub attempt_records: Vec<TaskAttempt>,
+    #[serde(default)]
     pub artifact_paths: Vec<PathBuf>,
     #[serde(default)]
     pub artifacts: Vec<TaskArtifact>,
@@ -500,6 +502,41 @@ pub struct TaskArtifact {
     pub kind: ArtifactKind,
     #[serde(default)]
     pub modified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAttempt {
+    pub id: Uuid,
+    pub number: u32,
+    pub worker_id: WorkerId,
+    pub state: TaskAttemptState,
+    pub leased_at: DateTime<Utc>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stdout_tail: Option<String>,
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+    #[serde(default)]
+    pub failure_summary: Option<String>,
+    pub log_ref: String,
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskAttemptState {
+    Leased,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Expired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -580,6 +617,8 @@ pub struct WorkerLogInput {
     pub job_id: Option<JobId>,
     #[serde(default)]
     pub task_id: Option<TaskId>,
+    #[serde(default)]
+    pub attempt_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,6 +634,8 @@ pub struct FarmLogEntry {
     pub job_id: Option<JobId>,
     #[serde(default)]
     pub task_id: Option<TaskId>,
+    #[serde(default)]
+    pub attempt_id: Option<Uuid>,
     #[serde(default)]
     pub worker_id: Option<WorkerId>,
 }
@@ -641,6 +682,8 @@ pub enum WorkerState {
 pub struct TaskLeaseInfo {
     pub token: String,
     pub worker_id: WorkerId,
+    #[serde(default)]
+    pub attempt_id: Uuid,
     pub leased_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
