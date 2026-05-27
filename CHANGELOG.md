@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Move macOS Intel release jobs to GitHub's current `macos-15-intel` runner label.
+- Publish a clean patch release after the `v0.1.1` release workflow was blocked waiting for unavailable `macos-13` runners.
+
 ## 0.1.1
 
 - Add dashboard APIs, Vite React dashboard, release binary assets, and install scripts.
