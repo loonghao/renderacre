@@ -22,6 +22,7 @@ anyhow = "1.0"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = "0.3"
 openjd-expr = "0.1.1"
 openjd-model = "0.2.0"
 openjd-sessions = "0.2.2"

@@ -13,6 +13,7 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 farm-core = { path = "../farm-core" }
+futures-util.workspace = true
 openjd-expr.workspace = true
 openjd-model.workspace = true
 openjd-sessions.workspace = true

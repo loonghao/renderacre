@@ -11,8 +11,8 @@ use uuid::Uuid;
 use crate::models::{
     DashboardSnapshot, FarmLogEntry, FarmStats, Job, JobId, JobState, JobSubmit, LogLevel,
     LogSource, Task, TaskArtifact, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
-    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerId, WorkerInfo, WorkerLogBatch,
-    WorkerRegister, WorkerState,
+    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo,
+    WorkerLogBatch, WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -220,7 +220,7 @@ impl InMemoryScheduler {
             id: Uuid::new_v4(),
             name: registration.name,
             labels: registration.labels,
-            capacity: registration.capacity,
+            capacity: normalize_capacity(registration.capacity),
             state: WorkerState::Online,
             registered_at: now,
             last_seen_at: now,
@@ -288,6 +288,14 @@ impl InMemoryScheduler {
         }
 
         expire_old_leases(&mut state);
+
+        let worker = state
+            .workers
+            .get(&worker_id)
+            .ok_or(FarmError::WorkerNotFound(worker_id))?;
+        if active_worker_slots(&state, worker_id) >= worker.capacity.slots {
+            return Ok(None);
+        }
 
         let now = Utc::now();
         let selected = state
@@ -683,6 +691,12 @@ fn storage_error(error: impl std::fmt::Display) -> FarmError {
     FarmError::Storage(error.to_string())
 }
 
+fn normalize_capacity(capacity: WorkerCapacity) -> WorkerCapacity {
+    WorkerCapacity {
+        slots: capacity.slots.max(1),
+    }
+}
+
 fn task_from_submit(
     job_id: JobId,
     task_ids_by_name: &HashMap<String, TaskId>,
@@ -727,6 +741,20 @@ fn task_from_submit(
         stdout_tail: None,
         stderr_tail: None,
     })
+}
+
+fn active_worker_slots(state: &SchedulerState, worker_id: WorkerId) -> u32 {
+    state
+        .jobs
+        .values()
+        .flat_map(|job| &job.tasks)
+        .filter(|task| matches!(task.state, TaskState::Leased | TaskState::Running))
+        .filter(|task| {
+            task.lease
+                .as_ref()
+                .is_some_and(|lease| lease.worker_id == worker_id)
+        })
+        .count() as u32
 }
 
 fn dependencies_are_satisfied(state: &SchedulerState, job_id: JobId, task_id: TaskId) -> bool {
@@ -871,6 +899,9 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
 
     for worker in state.workers.values() {
         stats.worker_slots += worker.capacity.slots;
+        let used_slots = active_worker_slots(state, worker.id);
+        stats.worker_slots_used += used_slots;
+        stats.worker_slots_available += worker.capacity.slots.saturating_sub(used_slots);
         match worker.state {
             WorkerState::Online => stats.workers_online += 1,
             WorkerState::Offline => stats.workers_offline += 1,
@@ -986,6 +1017,7 @@ mod tests {
         assert_eq!(snapshot.stats.tasks_pending, 1);
         assert_eq!(snapshot.stats.workers_online, 1);
         assert_eq!(snapshot.stats.worker_slots, 4);
+        assert_eq!(snapshot.stats.worker_slots_available, 4);
         assert_eq!(snapshot.jobs[0].name, "stats-demo");
         assert_eq!(snapshot.workers[0].name, "render-node-01");
     }
@@ -1151,6 +1183,111 @@ mod tests {
         assert_eq!(recovered.task.id, lease.task.id);
         assert_eq!(recovered.task.attempts, 2);
         let _ = std::fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn worker_slots_limit_concurrent_leases() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "slots-demo".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: (1..=3)
+                    .map(|index| TaskSubmit {
+                        name: format!("task-{index}"),
+                        command: command("echo"),
+                        dependencies: vec![],
+                        max_retries: None,
+                        artifact_paths: Vec::new(),
+                        openjd: None,
+                    })
+                    .collect(),
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "multi-slot".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity { slots: 2 },
+            })
+            .expect("worker should register");
+
+        let first = scheduler.lease_task(worker.id).unwrap().unwrap();
+        let second = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert_ne!(first.task.id, second.task.id);
+        assert!(scheduler.lease_task(worker.id).unwrap().is_none());
+
+        let snapshot = scheduler.dashboard_snapshot().unwrap();
+        assert_eq!(snapshot.stats.worker_slots, 2);
+        assert_eq!(snapshot.stats.worker_slots_used, 2);
+        assert_eq!(snapshot.stats.worker_slots_available, 0);
+    }
+
+    #[test]
+    fn worker_slot_is_released_after_task_completion() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "slot-release".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![
+                    TaskSubmit {
+                        name: "first".to_string(),
+                        command: command("echo"),
+                        dependencies: vec![],
+                        max_retries: None,
+                        artifact_paths: Vec::new(),
+                        openjd: None,
+                    },
+                    TaskSubmit {
+                        name: "second".to_string(),
+                        command: command("echo"),
+                        dependencies: vec![],
+                        max_retries: None,
+                        artifact_paths: Vec::new(),
+                        openjd: None,
+                    },
+                ],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "single-slot".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity { slots: 1 },
+            })
+            .expect("worker should register");
+
+        let first = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert!(scheduler.lease_task(worker.id).unwrap().is_none());
+        scheduler
+            .complete_task(
+                first.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: first.lease_token,
+                    exit_code: 0,
+                    stdout_tail: None,
+                    stderr_tail: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .expect("completion should release the slot");
+
+        let second = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert_ne!(first.task.id, second.task.id);
+        assert_eq!(
+            scheduler
+                .dashboard_snapshot()
+                .unwrap()
+                .stats
+                .worker_slots_used,
+            1
+        );
     }
 
     fn command(executable: &str) -> CommandSpec {

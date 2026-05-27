@@ -113,6 +113,10 @@ Start a worker:
 cargo run -p renderacre-worker -- --controller http://127.0.0.1:7878 --name local-worker --label os=windows
 ```
 
+Use `--slots <count>` for a worker that can execute multiple compatible tasks
+concurrently. The controller will not lease more active tasks to that worker
+than its registered slot capacity.
+
 Submit a direct command job:
 
 ```powershell
