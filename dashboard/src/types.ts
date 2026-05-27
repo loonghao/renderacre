@@ -96,9 +96,17 @@ export interface ApiWorker {
   name: string;
   labels: Record<string, string>;
   capacity: { slots: number };
+  identity?: ApiWorkerIdentity | null;
   state: "online" | "offline";
   registered_at: string;
   last_seen_at: string;
+}
+
+export interface ApiWorkerIdentity {
+  provider: string;
+  subject: string;
+  attributes?: Record<string, string>;
+  expires_at?: string | null;
 }
 
 export interface FarmLog {

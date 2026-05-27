@@ -40,6 +40,11 @@ Core endpoints:
 - `GET /v1/tasks/{task_id}/attempts/{attempt_id}/logs`: read logs for one durable attempt record.
 - `GET /v1/tasks/{task_id}/artifacts/{artifact_index}`: download a captured task artifact.
 
+Backend, artifact, identity, and scheduler extension boundaries are defined in
+[extension-contracts.md](extension-contracts.md). That note separates stable
+client contracts from experimental backend and cloud-provider implementation
+points.
+
 Task leases have a configurable controller-side TTL. Workers renew leases while
 direct command and OpenJD tasks are still executing, so long-running work is not
 dispatched twice while its worker remains healthy. If a worker disappears and no
@@ -56,6 +61,11 @@ registration. Unconstrained tasks keep the previous behavior and can run on any
 worker. OpenJD `hostRequirements` are carried through the same scheduler path:
 standard amount capabilities are read from worker labels or slot capacity, and
 standard attribute capabilities are read from worker labels.
+
+Worker registration accepts optional identity metadata for provisioned or
+short-lived workers. Labels continue to describe scheduling capabilities;
+identity remains provenance and authorization context so the scheduler can keep
+task placement independent from cloud providers.
 
 Lifecycle actions are idempotent where repeating the same request is safe, and
 invalid state transitions return a conflict response with a descriptive error.

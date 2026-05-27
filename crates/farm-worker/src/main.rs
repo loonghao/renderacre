@@ -189,6 +189,7 @@ async fn register_worker(
             capacity: WorkerCapacity {
                 slots: args.slots.max(1),
             },
+            identity: None,
         })
         .send()
         .await?
