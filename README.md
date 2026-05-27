@@ -127,6 +127,23 @@ Invoke-RestMethod `
   -InFile .\examples\hello_job.json
 ```
 
+Tasks can optionally declare routing requirements without changing older job
+payloads:
+
+```json
+{
+  "name": "maya-render",
+  "command": { "executable": "mayapy", "args": ["render.py"] },
+  "requirements": {
+    "labels": { "os": "windows", "app": "maya" },
+    "pools": ["lighting"]
+  }
+}
+```
+
+Workers advertise matching capabilities with labels such as
+`--label os=windows --label app=maya --label pool=lighting`.
+
 ## Python Submitter API
 
 Install a local build:

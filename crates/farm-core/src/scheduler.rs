@@ -283,16 +283,14 @@ impl InMemoryScheduler {
 
     pub fn lease_task(&self, worker_id: WorkerId) -> Result<Option<TaskLease>, FarmError> {
         let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
-        if !state.workers.contains_key(&worker_id) {
-            return Err(FarmError::WorkerNotFound(worker_id));
-        }
-
-        expire_old_leases(&mut state);
-
         let worker = state
             .workers
             .get(&worker_id)
+            .cloned()
             .ok_or(FarmError::WorkerNotFound(worker_id))?;
+
+        expire_old_leases(&mut state);
+
         if active_worker_slots(&state, worker_id) >= worker.capacity.slots {
             return Ok(None);
         }
@@ -316,6 +314,9 @@ impl InMemoryScheduler {
                     })
             })
             .filter(|(job_id, task_id, _, _)| dependencies_are_satisfied(&state, *job_id, *task_id))
+            .filter(|(job_id, task_id, _, _)| {
+                task_matches_worker(&state, *job_id, *task_id, &worker)
+            })
             .max_by_key(|(_, _, priority, created_at)| (*priority, std::cmp::Reverse(*created_at)));
 
         let Some((job_id, task_id, _, _)) = selected else {
@@ -728,6 +729,7 @@ fn task_from_submit(
         command: submission.command,
         openjd: submission.openjd,
         dependencies,
+        requirements: submission.requirements,
         attempts: 0,
         max_retries: submission.max_retries.unwrap_or(job_max_retries),
         lease: None,
@@ -755,6 +757,44 @@ fn active_worker_slots(state: &SchedulerState, worker_id: WorkerId) -> u32 {
                 .is_some_and(|lease| lease.worker_id == worker_id)
         })
         .count() as u32
+}
+
+fn task_matches_worker(
+    state: &SchedulerState,
+    job_id: JobId,
+    task_id: TaskId,
+    worker: &WorkerInfo,
+) -> bool {
+    let Some(job) = state.jobs.get(&job_id) else {
+        return false;
+    };
+    let Some(task) = job.tasks.iter().find(|task| task.id == task_id) else {
+        return false;
+    };
+
+    let pool_matches = task.requirements.pools.is_empty()
+        || worker.labels.get("pool").is_some_and(|pool| {
+            task.requirements
+                .pools
+                .iter()
+                .any(|required| required == pool)
+        });
+    let labels_match = task.requirements.labels.iter().all(|(key, required)| {
+        worker
+            .labels
+            .get(key)
+            .is_some_and(|actual| label_value_matches(actual, required))
+    });
+
+    pool_matches && labels_match
+}
+
+fn label_value_matches(actual: &str, required: &str) -> bool {
+    actual == required
+        || actual
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == required)
 }
 
 fn dependencies_are_satisfied(state: &SchedulerState, job_id: JobId, task_id: TaskId) -> bool {
@@ -914,7 +954,8 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
 #[cfg(test)]
 mod tests {
     use crate::models::{
-        CommandSpec, TaskLease, TaskLeaseRenewal, WorkerCapacity, WorkerId, WorkerInfo,
+        CommandSpec, TaskLease, TaskLeaseRenewal, TaskRequirements, WorkerCapacity, WorkerId,
+        WorkerInfo,
     };
 
     use super::*;
@@ -933,6 +974,7 @@ mod tests {
                         name: "prepare".to_string(),
                         command: command("echo"),
                         dependencies: vec![],
+                        requirements: Default::default(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -941,6 +983,7 @@ mod tests {
                         name: "render".to_string(),
                         command: command("echo"),
                         dependencies: vec!["prepare".to_string()],
+                        requirements: Default::default(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -994,6 +1037,7 @@ mod tests {
                     name: "main".to_string(),
                     command: command("echo"),
                     dependencies: vec![],
+                    requirements: Default::default(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1088,6 +1132,7 @@ mod tests {
                     name: "main".to_string(),
                     command: command("echo"),
                     dependencies: vec![],
+                    requirements: Default::default(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1143,6 +1188,7 @@ mod tests {
                     name: "main".to_string(),
                     command: command("echo"),
                     dependencies: vec![],
+                    requirements: Default::default(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1198,6 +1244,7 @@ mod tests {
                         name: format!("task-{index}"),
                         command: command("echo"),
                         dependencies: vec![],
+                        requirements: Default::default(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1238,6 +1285,7 @@ mod tests {
                         name: "first".to_string(),
                         command: command("echo"),
                         dependencies: vec![],
+                        requirements: Default::default(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1246,6 +1294,7 @@ mod tests {
                         name: "second".to_string(),
                         command: command("echo"),
                         dependencies: vec![],
+                        requirements: Default::default(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1290,6 +1339,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn leases_only_tasks_matching_worker_labels_and_pool() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "routing-demo".to_string(),
+                priority: 0,
+                max_retries: 0,
+                openjd: None,
+                tasks: vec![
+                    TaskSubmit {
+                        name: "windows-render".to_string(),
+                        command: command("echo"),
+                        dependencies: vec![],
+                        requirements: TaskRequirements {
+                            labels: HashMap::from([
+                                ("os".to_string(), "windows".to_string()),
+                                ("app".to_string(), "maya".to_string()),
+                            ]),
+                            pools: vec!["lighting".to_string()],
+                        },
+                        max_retries: None,
+                        artifact_paths: Vec::new(),
+                        openjd: None,
+                    },
+                    TaskSubmit {
+                        name: "linux-sim".to_string(),
+                        command: command("echo"),
+                        dependencies: vec![],
+                        requirements: TaskRequirements {
+                            labels: HashMap::from([("os".to_string(), "linux".to_string())]),
+                            pools: vec!["sim".to_string()],
+                        },
+                        max_retries: None,
+                        artifact_paths: Vec::new(),
+                        openjd: None,
+                    },
+                ],
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "maya-node".to_string(),
+                labels: HashMap::from([
+                    ("os".to_string(), "windows".to_string()),
+                    ("app".to_string(), "maya,blender".to_string()),
+                    ("pool".to_string(), "lighting".to_string()),
+                ]),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register");
+
+        let lease = scheduler
+            .lease_task(worker.id)
+            .expect("lease should work")
+            .expect("matching task should be leased");
+        assert_eq!(lease.task.name, "windows-render");
+        assert!(scheduler.lease_task(worker.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn leases_unconstrained_tasks_to_unlabeled_workers() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "default-routing".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    requirements: Default::default(),
+                    max_retries: None,
+                    artifact_paths: Vec::new(),
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "plain-worker".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register");
+
+        assert!(scheduler.lease_task(worker.id).unwrap().is_some());
+    }
+
     fn command(executable: &str) -> CommandSpec {
         CommandSpec {
             executable: executable.to_string(),
@@ -1320,6 +1460,7 @@ mod tests {
                     name: "main".to_string(),
                     command: command("echo"),
                     dependencies: vec![],
+                    requirements: Default::default(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,

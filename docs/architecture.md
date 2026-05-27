@@ -37,6 +37,11 @@ Worker capacity is enforced by the scheduler. A worker that registers multiple
 slots can hold that many active leases, and `/v1/stats` reports total, used, and
 available worker slots for API and dashboard consumers.
 
+Task routing is schema-driven and backward-compatible. A task may require worker
+labels and one of several pools; workers advertise those capabilities during
+registration. Unconstrained tasks keep the previous behavior and can run on any
+worker.
+
 ## OpenJD path
 
 The controller accepts an OpenJD template bundle under `openjd.template_yaml`. It uses the official OpenJD Rust crates instead of a hand-written parser:
