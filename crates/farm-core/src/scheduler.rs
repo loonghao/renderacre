@@ -265,6 +265,7 @@ impl InMemoryScheduler {
             name: registration.name,
             labels: registration.labels,
             capacity: normalize_capacity(registration.capacity),
+            identity: registration.identity,
             state: WorkerState::Online,
             registered_at: now,
             last_seen_at: now,
@@ -1782,7 +1783,7 @@ mod tests {
         ArtifactKind, AuditEventInput, AuditOutcome, CommandSpec, LogLevel,
         OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition, TaskArtifact,
         TaskAttemptState, TaskLease, TaskLeaseRenewal, TaskRequirements, TaskStarted,
-        WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch, WorkerLogInput,
+        WorkerCapacity, WorkerId, WorkerIdentity, WorkerInfo, WorkerLogBatch, WorkerLogInput,
     };
 
     use super::*;
@@ -1825,6 +1826,7 @@ mod tests {
                 name: "local".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
 
@@ -1880,6 +1882,7 @@ mod tests {
                 name: "render-node-01".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity { slots: 4 },
+                identity: None,
             })
             .expect("worker should register");
 
@@ -1894,6 +1897,36 @@ mod tests {
         assert_eq!(snapshot.stats.worker_slots_available, 4);
         assert_eq!(snapshot.jobs[0].name, "stats-demo");
         assert_eq!(snapshot.workers[0].name, "render-node-01");
+    }
+
+    #[test]
+    fn worker_registration_preserves_optional_identity() {
+        let scheduler = InMemoryScheduler::default();
+        let expires_at = Utc::now() + Duration::minutes(30);
+        let identity = WorkerIdentity {
+            provider: "aws-sts".to_string(),
+            subject: "i-0123456789abcdef0".to_string(),
+            attributes: HashMap::from([("region".to_string(), "us-west-2".to_string())]),
+            expires_at: Some(expires_at),
+        };
+
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "cloud-worker".to_string(),
+                labels: HashMap::from([("pool".to_string(), "burst".to_string())]),
+                capacity: WorkerCapacity { slots: 8 },
+                identity: Some(identity.clone()),
+            })
+            .expect("worker should register");
+
+        assert_eq!(worker.identity.as_ref(), Some(&identity));
+        let listed_worker = scheduler
+            .list_workers()
+            .expect("workers should list")
+            .pop()
+            .expect("worker should be present");
+        assert_eq!(listed_worker.identity.as_ref(), Some(&identity));
+        assert_eq!(listed_worker.capacity.slots, 8);
     }
 
     #[test]
@@ -2025,11 +2058,18 @@ mod tests {
                 openjd: None,
             })
             .expect("job should submit");
+        let identity = WorkerIdentity {
+            provider: "cloud-runner".to_string(),
+            subject: "worker-group/render-node-01".to_string(),
+            attributes: HashMap::from([("lifecycle".to_string(), "spot".to_string())]),
+            expires_at: Some(Utc::now() + Duration::minutes(15)),
+        };
         let worker = scheduler
             .register_worker(WorkerRegister {
                 name: "render-node-01".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity { slots: 2 },
+                identity: Some(identity.clone()),
             })
             .expect("worker should register");
         let lease = scheduler
@@ -2057,6 +2097,10 @@ mod tests {
         assert_eq!(restored.tasks[0].state, TaskState::Pending);
         assert_eq!(restored.tasks[0].stdout_tail.as_deref(), Some("stdout"));
         assert_eq!(reopened.list_workers().unwrap()[0].name, "render-node-01");
+        assert_eq!(
+            reopened.list_workers().unwrap()[0].identity.as_ref(),
+            Some(&identity)
+        );
         let _ = std::fs::remove_file(database_path);
     }
 
@@ -2142,6 +2186,7 @@ mod tests {
                 name: "durable-worker".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
         let job = scheduler
@@ -2218,6 +2263,7 @@ mod tests {
                 name: "worker".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
         let lease = scheduler
@@ -2276,6 +2322,7 @@ mod tests {
                 name: "multi-slot".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity { slots: 2 },
+                identity: None,
             })
             .expect("worker should register");
 
@@ -2328,6 +2375,7 @@ mod tests {
                 name: "single-slot".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity { slots: 1 },
+                identity: None,
             })
             .expect("worker should register");
 
@@ -2412,6 +2460,7 @@ mod tests {
                     ("pool".to_string(), "lighting".to_string()),
                 ]),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
 
@@ -2449,6 +2498,7 @@ mod tests {
                 name: "plain-worker".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
 
@@ -2494,6 +2544,7 @@ mod tests {
                 name: "small-linux".to_string(),
                 labels: HashMap::from([("ATTR.WORKER.OS.FAMILY".to_string(), "linux".to_string())]),
                 capacity: WorkerCapacity { slots: 1 },
+                identity: None,
             })
             .expect("worker should register");
         assert!(scheduler
@@ -2506,6 +2557,7 @@ mod tests {
                 name: "large-linux".to_string(),
                 labels: HashMap::from([("attr.worker.os.family".to_string(), "linux".to_string())]),
                 capacity: WorkerCapacity { slots: 2 },
+                identity: None,
             })
             .expect("worker should register");
         let lease = scheduler
@@ -2541,6 +2593,7 @@ mod tests {
                 name: "local".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
 
@@ -2615,6 +2668,7 @@ mod tests {
                 name: "local".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register");
         let lease = scheduler.lease_task(worker.id).unwrap().unwrap();
@@ -2767,6 +2821,7 @@ mod tests {
                 name: "local".to_string(),
                 labels: HashMap::new(),
                 capacity: WorkerCapacity::default(),
+                identity: None,
             })
             .expect("worker should register")
     }

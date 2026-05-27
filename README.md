@@ -352,6 +352,10 @@ same for REST workers, dashboard reads, and Python submitters; future Postgres
 or managed/cloud storage backends can replace the same storage boundary without
 changing submitter contracts.
 
+Cloud-ready backend, artifact, worker identity, and scheduler extension
+contracts are documented in
+[docs/extension-contracts.md](docs/extension-contracts.md).
+
 ## Release
 
 The release workflow builds Linux, Windows, and macOS wheels plus an sdist. PyPI publishing uses Trusted Publishing through the `pypi` GitHub environment.

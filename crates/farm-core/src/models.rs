@@ -615,6 +615,8 @@ pub struct WorkerRegister {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub capacity: WorkerCapacity,
+    #[serde(default)]
+    pub identity: Option<WorkerIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -634,9 +636,21 @@ pub struct WorkerInfo {
     pub name: String,
     pub labels: HashMap<String, String>,
     pub capacity: WorkerCapacity,
+    #[serde(default)]
+    pub identity: Option<WorkerIdentity>,
     pub state: WorkerState,
     pub registered_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerIdentity {
+    pub provider: String,
+    pub subject: String,
+    #[serde(default)]
+    pub attributes: HashMap<String, String>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
