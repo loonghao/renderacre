@@ -277,7 +277,7 @@ function Sidebar({ stats, source }: { stats: ApiStats; source: "live" | "sample"
         ))}
       </nav>
       <div className="controller-card">
-        <div><span className="status-dot online" /> Controller <small>v0.1.3</small></div>
+        <div><span className="status-dot online" /> Controller <small>v0.1.4</small></div>
         <dl>
           <dt>Jobs</dt><dd>{stats.jobs_total.toLocaleString()}</dd>
           <dt>Tasks</dt><dd>{stats.tasks_total.toLocaleString()}</dd>

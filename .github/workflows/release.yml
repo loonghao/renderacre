@@ -23,6 +23,7 @@ jobs:
   build-binaries:
     name: Build binaries (${{ matrix.asset_suffix }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +147,7 @@ jobs:
         with:
           packages-dir: dist
           skip-existing: true
+          attestations: false
 
   publish-github-release:
     name: Publish GitHub Release assets

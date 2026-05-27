@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- Disable PyPI digital attestations to avoid transient Sigstore/Rekor upload failures while keeping Trusted Publishing.
+- Add a release binary build timeout so stuck hosted runners fail quickly.
+
 ## 0.1.3
 
 - Limit PyPI publishing to Python wheels and source distribution artifacts.
