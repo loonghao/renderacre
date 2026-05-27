@@ -52,6 +52,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Blender runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxi6 libxrender1 libxxf86vm1 xvfb
+
       - name: Install Blender from tarball
         run: |
           wget -q "${{ matrix.blender-url }}" -O /tmp/blender.tar.xz
@@ -62,7 +67,7 @@ jobs:
         run: blender --version
 
       - name: Run Blender OpenJD e2e
-        run: python scripts/e2e_dcc_tasks.py --jobs blender --blender-exe blender
+        run: xvfb-run -a python scripts/e2e_dcc_tasks.py --jobs blender --blender-exe blender
 
   maya-openjd:
     name: Maya OpenJD ${{ matrix.maya-version }}
