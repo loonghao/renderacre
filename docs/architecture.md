@@ -9,7 +9,12 @@ Renderacre is shaped like a small Deadline-style farm: one controller owns the q
 
 ## Control plane
 
-The first implementation uses an in-memory scheduler so the API and worker protocol can stabilize quickly. The storage boundary is deliberately inside `InMemoryScheduler`; replacing it with SQLite/Postgres later should not change the remote API or Python API.
+The default implementation uses an in-memory scheduler so tests and demos stay
+fast. Production-sized local farms can start the controller with the SQLite
+backend, which persists the same scheduler state behind the existing REST and
+Python contracts. The storage boundary is deliberately behind the scheduler API:
+Postgres, object-backed logs, or managed/cloud control planes should replace
+the backend without changing submitter or worker payloads.
 
 Core endpoints:
 
@@ -36,7 +41,8 @@ The controller accepts an OpenJD template bundle under `openjd.template_yaml`. I
 - Renderacre converts each resolved step/task combination into a farm task while preserving OpenJD runtime context such as parameter values, path mappings, environments, embedded files, and supported extensions.
 - `openjd-sessions` runs the task on the worker, including environment enter/exit actions and OpenJD stdout directive handling.
 
-The first storage backend is intentionally in-memory, but the OpenJD conversion boundary is separate from storage so a durable queue can be added without changing Python submitters or worker execution.
+OpenJD conversion stays separate from scheduler storage, so durable queues do not
+change Python submitters or worker execution payloads.
 
 ## Python path
 
@@ -52,7 +58,21 @@ Keeping Python at the API edge lets DCC submitters stay pleasant while Rust owns
 
 ## Deployment shape
 
-The recommended first production shape is a private controller behind an authenticated proxy plus one worker process per render node. OpenJD `PATH` parameters should point at shared storage for scenes, scripts, and output directories. The current scheduler keeps state in memory; SQLite/Postgres/NATS can replace `InMemoryScheduler` later behind the same REST and Python contracts.
+The recommended first production shape is a private controller behind an
+authenticated proxy plus one worker process per render node. OpenJD `PATH`
+parameters should point at shared storage for scenes, scripts, and output
+directories. The controller can run with in-memory storage for demos or SQLite
+for a durable local farm.
+
+For the lightweight durable profile, run:
+
+```text
+renderacre-controller --storage sqlite --sqlite-path /var/lib/renderacre/renderacre.sqlite3
+```
+
+SQLite persists submitted jobs, task attempts, leases, worker registrations, and
+dashboard history needed for normal queue recovery. Expired leases are recovered
+when workers resume leasing after a controller restart.
 
 ## Dashboard path
 
