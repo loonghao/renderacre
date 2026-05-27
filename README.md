@@ -82,7 +82,7 @@ cargo install --path crates/farm-worker --locked
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_smoke.ps1
-python .\scripts\e2e_dcc_tasks.py --jobs python
+python .\scripts\e2e_dcc_tasks.py --jobs python,command
 python -m maturin build --release -o target\wheels
 ```
 
@@ -210,12 +210,36 @@ npm run build
 
 Serve `dashboard/dist` through your internal web server or reverse proxy next to the controller API.
 
-## DCC Examples
+## Command and DCC Examples
 
-Renderacre ships real OpenJD examples for Python frame tasks, Blender background
-renders, and Maya standalone scene exports. The same templates are exercised by
-the `DCC E2E` GitHub Actions workflow: Blender uses official Linux tarballs, and
-Maya uses the `tahv/mayapy` container images.
+Renderacre can run any executable the worker can spawn: `cmd.exe`, PowerShell,
+`pwsh`, `bash`, `sh`, Blender, Maya, `ffmpeg`, ImageMagick, studio launchers, or
+your own tools. Generic command frames are the quickest local test because they
+submit three frame tasks per shell, write one text artifact per frame, echo the
+artifact path with `RENDERACRE_ARTIFACT=...`, and verify the worker logs plus the
+download API.
+
+Run command frame tests against the shells available on the current machine:
+
+```powershell
+python .\scripts\e2e_dcc_tasks.py --jobs command --shells auto
+```
+
+Pin specific shell runners when testing Windows and POSIX wrapper behavior:
+
+```powershell
+python .\scripts\e2e_dcc_tasks.py --jobs command --shells cmd,powershell,bash
+```
+
+Frame outputs are written under
+`target/e2e-dcc/command-frames/<shell>/*_frame_0001.txt` and uploaded by CI as
+`command-frame-artifacts`.
+
+Renderacre also ships real OpenJD examples for Python frame tasks, Blender
+background renders, and Maya standalone scene exports. The same templates are
+exercised by the `DCC E2E` GitHub Actions workflow: the generic command job uses
+the runner shells, Blender uses official Linux tarballs, and Maya uses the
+`tahv/mayapy` container images.
 
 Run the full DCC e2e suite on a machine that has Blender and Maya on `PATH`:
 
@@ -253,8 +277,9 @@ $params = @{
 
 Pass the template and parameter JSON through `renderacre.openjd_job(...)` or submit the equivalent REST payload to `/v1/jobs`.
 
-For CI parity, the script writes Blender PNGs and Maya `.ma` scenes under
-`target/e2e-dcc/` and fails if any expected frame output is missing.
+For CI parity, the script writes command `.txt` frames, Blender PNGs, and Maya
+`.ma` scenes under `target/e2e-dcc/` and fails if any expected frame output,
+artifact download, or worker log line is missing.
 
 ## Deployment
 

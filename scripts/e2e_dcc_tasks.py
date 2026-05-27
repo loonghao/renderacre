@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Renderacre OpenJD end-to-end jobs against Python, Blender, and Maya."""
+"""Run Renderacre end-to-end jobs against generic commands and DCC hosts."""
 
 import argparse
 import json
@@ -17,7 +17,7 @@ def main():
     args = parse_args()
     repo = Path(__file__).resolve().parents[1]
     port = args.port or int(os.environ.get("RENDERACRE_E2E_PORT", "17878"))
-    jobs = resolve_jobs(args.jobs, args.blender_exe, args.maya_python)
+    jobs = resolve_jobs(args.jobs, args.blender_exe, args.maya_python, args.shells)
 
     if args.build:
         run(["cargo", "build", "-p", "renderacre-controller", "-p", "renderacre-worker"], repo)
@@ -58,6 +58,8 @@ def main():
         for job in jobs:
             if job == "python":
                 results.append(run_python_job(repo, port, run_dir, args.python_exe))
+            elif job == "command":
+                results.append(run_command_job(port, run_dir, args.shells))
             elif job == "blender":
                 results.append(run_blender_job(repo, port, run_dir, args.blender_exe))
             elif job == "maya":
@@ -84,7 +86,7 @@ def parse_args():
     parser.add_argument(
         "--jobs",
         default="auto",
-        help="Comma-separated jobs: auto, python, blender, maya, or all.",
+        help="Comma-separated jobs: auto, python, command, blender, maya, or all.",
     )
     parser.add_argument("--port", type=int)
     parser.add_argument("--build", dest="build", action="store_true", default=True)
@@ -92,24 +94,32 @@ def parse_args():
     parser.add_argument("--controller-bin")
     parser.add_argument("--worker-bin")
     parser.add_argument("--python-exe", default=sys.executable)
+    parser.add_argument(
+        "--shells",
+        default=os.environ.get("RENDERACRE_E2E_SHELLS", "auto"),
+        help="Comma-separated shells for command jobs: auto, cmd, powershell, pwsh, bash, sh.",
+    )
     parser.add_argument("--blender-exe", default=os.environ.get("BLENDER_EXE", "blender"))
     parser.add_argument("--maya-python", default=os.environ.get("MAYA_PYTHON", "mayapy"))
     return parser.parse_args()
 
 
-def resolve_jobs(value, blender_exe, maya_python):
+def resolve_jobs(value, blender_exe, maya_python, shells):
     requested = [item.strip().lower() for item in value.split(",") if item.strip()]
+    requested = ["command" if job == "shell" else job for job in requested]
     if requested == ["all"]:
-        requested = ["python", "blender", "maya"]
+        requested = ["python", "command", "blender", "maya"]
     if requested == ["auto"]:
         jobs = ["python"]
+        if resolve_shells(shells):
+            jobs.append("command")
         if find_executable(blender_exe):
             jobs.append("blender")
         if find_executable(maya_python):
             jobs.append("maya")
         return jobs
 
-    allowed = {"python", "blender", "maya"}
+    allowed = {"python", "command", "blender", "maya"}
     unknown = [job for job in requested if job not in allowed]
     if unknown:
         raise ValueError("unknown jobs: {0}".format(", ".join(unknown)))
@@ -155,6 +165,69 @@ def require_executable(value, label):
     if not resolved:
         raise FileNotFoundError("{0} executable not found: {1}".format(label, value))
     return resolved
+
+
+def resolve_shells(value):
+    requested = [item.strip().lower() for item in value.split(",") if item.strip()]
+    if not requested or requested == ["auto"]:
+        requested = default_shell_order()
+
+    specs = []
+    seen = set()
+    candidates = shell_candidates()
+    for name in requested:
+        if name in seen:
+            continue
+        spec = candidates.get(name)
+        if spec is None:
+            raise ValueError("unknown shell: {0}".format(name))
+        executable = find_executable(spec["executable"])
+        if executable:
+            resolved = dict(spec)
+            resolved["executable"] = executable
+            if name in ("bash", "sh"):
+                resolved["path_style"] = detect_posix_path_style(executable)
+            specs.append(resolved)
+            seen.add(name)
+    return specs
+
+
+def default_shell_order():
+    if os.name == "nt":
+        return ["cmd", "powershell", "pwsh", "bash"]
+    return ["bash", "sh", "pwsh"]
+
+
+def shell_candidates():
+    return {
+        "cmd": {"name": "cmd", "executable": "cmd.exe", "args": ["/C"]},
+        "powershell": {
+            "name": "powershell",
+            "executable": "powershell.exe",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
+        },
+        "pwsh": {"name": "pwsh", "executable": "pwsh", "args": ["-NoProfile", "-Command"]},
+        "bash": {"name": "bash", "executable": "bash", "args": ["-lc"]},
+        "sh": {"name": "sh", "executable": "sh", "args": ["-c"]},
+    }
+
+
+def detect_posix_path_style(executable):
+    if os.name != "nt":
+        return "native"
+    probe = "if command -v cygpath >/dev/null 2>&1; then echo msys; elif [ -d /mnt/c ]; then echo wsl; else echo native; fi"
+    try:
+        completed = subprocess.run(
+            [executable, "-lc", probe],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return "native"
+    value = completed.stdout.strip().splitlines()
+    return value[-1] if value and value[-1] in ("msys", "wsl", "native") else "native"
 
 
 def start_process(command, cwd, stdout_path, stderr_path):
@@ -251,6 +324,126 @@ def request_bytes(method, url):
     request = urllib.request.Request(url, method=method)
     with urllib.request.urlopen(request, timeout=10) as response:
         return response.read()
+
+
+def run_command_job(port, run_dir, shell_selection):
+    specs = resolve_shells(shell_selection)
+    if not specs:
+        raise FileNotFoundError("no command shells were found for selection: {0}".format(shell_selection))
+
+    total_tasks = 0
+    job_ids = []
+    for spec in specs:
+        output_dir = clean_dir(run_dir / "command-frames" / spec["name"])
+        tasks = []
+        expected_texts = []
+        for frame in range(1, 4):
+            command_text, output_file, expected_text = shell_frame_command(spec, output_dir, frame)
+            expected_texts.append(expected_text)
+            tasks.append(
+                {
+                    "name": "{0}-frame-{1:04d}".format(spec["name"], frame),
+                    "command": {
+                        "executable": spec["executable"],
+                        "args": spec["args"] + [command_text],
+                        "working_dir": str(output_dir),
+                    },
+                    "artifact_paths": [str(output_dir)],
+                }
+            )
+
+        job = submit_job(
+            port,
+            {
+                "name": "e2e-command-{0}-frames".format(spec["name"]),
+                "tasks": tasks,
+            },
+        )
+        final = require_success(port, job["id"], "command-{0}".format(spec["name"]))
+        safe_name = spec["name"].replace("-", "_")
+        require_files(output_dir, "{0}_frame_{{0:04d}}.txt".format(safe_name), range(1, 4))
+        require_artifacts(port, final, min_count=3)
+        require_artifact_texts(port, final, expected_texts)
+        require_worker_logs(port, [expected_texts[0]])
+        total_tasks += len(final["tasks"])
+        job_ids.append(final["id"])
+
+    return {"name": "command", "job_id": ",".join(job_ids), "tasks": total_tasks}
+
+
+def shell_frame_command(spec, output_dir, frame):
+    shell_name = spec["name"]
+    safe_name = shell_name.replace("-", "_")
+    output_file = output_dir / "{0}_frame_{1:04d}.txt".format(safe_name, frame)
+    expected_text = "renderacre {0} frame {1}".format(shell_name, frame)
+    artifact_line = "RENDERACRE_ARTIFACT={0}".format(str(output_file))
+
+    if shell_name == "cmd":
+        relative_file = output_file.name
+        command = (
+            "echo {text} > {file_path} & "
+            "echo {artifact} & "
+            "type {file_path}"
+        ).format(
+            text=expected_text,
+            file_path=relative_file,
+            artifact=artifact_line,
+        )
+        return command, output_file, expected_text
+
+    if shell_name in ("powershell", "pwsh"):
+        command = (
+            "$path = {path}; "
+            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null; "
+            "Set-Content -LiteralPath $path -Value {text}; "
+            "Write-Output {artifact}; "
+            "Get-Content -LiteralPath $path"
+        ).format(
+            path=ps_quote(output_file),
+            text=ps_quote(expected_text),
+            artifact=ps_quote(artifact_line),
+        )
+        return command, output_file, expected_text
+
+    if shell_name in ("bash", "sh"):
+        shell_output_dir = posix_shell_path(output_dir, spec.get("path_style", "native"))
+        shell_output_file = posix_shell_path(output_file, spec.get("path_style", "native"))
+        command = (
+            "mkdir -p {dir_q}; "
+            "printf '%s\\n' {text_q} > {file_q}; "
+            "echo {artifact_q}; "
+            "cat {file_q}"
+        ).format(
+            dir_q=sh_quote(shell_output_dir),
+            text_q=sh_quote(expected_text),
+            file_q=sh_quote(shell_output_file),
+            artifact_q=sh_quote(artifact_line),
+        )
+        return command, output_file, expected_text
+
+    raise ValueError("unsupported shell: {0}".format(shell_name))
+
+
+def ps_quote(value):
+    return "'{0}'".format(str(value).replace("'", "''"))
+
+
+def sh_quote(value):
+    return "'{0}'".format(str(value).replace("'", "'\"'\"'"))
+
+
+def posix_shell_path(path, style):
+    text = str(path)
+    if os.name == "nt" and len(text) > 1 and text[1] == ":":
+        drive = text[0].lower()
+        rest = text[2:].replace("\\", "/").lstrip("/")
+        if style == "msys":
+            return "/{0}/{1}".format(drive, rest)
+        if style == "wsl":
+            return "/mnt/{0}/{1}".format(drive, rest)
+    if isinstance(path, Path):
+        return path.as_posix()
+    return text.replace("\\", "/")
 
 
 def run_python_job(repo, port, run_dir, python_exe):
@@ -482,6 +675,26 @@ def require_artifacts(port, job, min_count, png=False):
         )
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise AssertionError("artifact is not a PNG: {0}".format(artifact))
+
+
+def require_artifact_texts(port, job, expected_texts):
+    downloaded = []
+    for task in job.get("tasks", []):
+        for index, _artifact in enumerate(task.get("artifacts", [])):
+            data = request_bytes(
+                "GET",
+                "http://127.0.0.1:{0}/v1/tasks/{1}/artifacts/{2}".format(
+                    port,
+                    task["id"],
+                    index,
+                ),
+            )
+            downloaded.append(data.decode("utf-8", errors="replace"))
+
+    content = "\n".join(downloaded)
+    missing = [text for text in expected_texts if text not in content]
+    if missing:
+        raise AssertionError("missing expected artifact text: {0}".format(", ".join(missing)))
 
 
 def require_dependency_graph(job):

@@ -23,8 +23,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run Python OpenJD e2e
-        run: python scripts/e2e_dcc_tasks.py --jobs python
+      - name: Run Python, command, and shell e2e
+        run: python scripts/e2e_dcc_tasks.py --jobs python,command
 
       - name: Upload Python e2e artifacts
         if: always()
@@ -33,6 +33,14 @@ jobs:
           name: python-e2e-artifacts
           path: target/e2e-dcc/python-artifacts/*
           if-no-files-found: ignore
+
+      - name: Upload command frame artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: command-frame-artifacts
+          path: target/e2e-dcc/command-frames/**/*.txt
+          if-no-files-found: error
 
   blender-openjd:
     name: Blender OpenJD ${{ matrix.blender-version }}
