@@ -17,6 +17,11 @@ case "$(uname -m)" in
   *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
+if [[ "$os" == "linux" && "$arch" != "x86_64" ]]; then
+  echo "unsupported release asset: linux-${arch}; published Linux binaries are x86_64 only" >&2
+  exit 1
+fi
+
 if [[ "$version" == "latest" ]]; then
   if command -v curl >/dev/null 2>&1; then
     version="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
