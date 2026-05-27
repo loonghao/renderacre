@@ -1,0 +1,19 @@
+[package]
+name = "farm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+chrono.workspace = true
+openjd-expr.workspace = true
+openjd-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

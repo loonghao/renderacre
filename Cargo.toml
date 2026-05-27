@@ -1,0 +1,39 @@
+[workspace]
+members = [
+    "crates/farm-core",
+    "crates/farm-controller",
+    "crates/farm-worker",
+    "crates/farm-python",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Renderacre contributors"]
+description = "Rust render-farm controller, worker, OpenJD, and Python bindings"
+repository = "https://github.com/loonghao/renderacre"
+homepage = "https://github.com/loonghao/renderacre"
+readme = "README.md"
+
+[workspace.dependencies]
+anyhow = "1.0"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+openjd-expr = "0.1.1"
+openjd-model = "0.2.0"
+openjd-sessions = "0.2.2"
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py37"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+tempfile = "3.23"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.18", features = ["serde", "v4"] }

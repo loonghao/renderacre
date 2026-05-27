@@ -1,0 +1,37 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "renderacre"
+version = "0.1.0"
+description = "Rust render-farm controller, worker, and Python bindings"
+requires-python = ">=3.7"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["renderfarm", "render-farm", "openjd", "deadline", "dcc", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+    "Topic :: System :: Distributed Computing",
+]
+
+[project.urls]
+Homepage = "https://github.com/loonghao/renderacre"
+Repository = "https://github.com/loonghao/renderacre"
+Issues = "https://github.com/loonghao/renderacre/issues"
+Changelog = "https://github.com/loonghao/renderacre/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+manifest-path = "crates/farm-python/Cargo.toml"
+module-name = "renderacre"

@@ -1,0 +1,30 @@
+specificationVersion: jobtemplate-2023-09
+name: BlenderRender
+parameterDefinitions:
+  - name: BlenderExecutable
+    type: STRING
+    default: blender
+  - name: ScriptPath
+    type: PATH
+  - name: OutputDir
+    type: PATH
+steps:
+  - name: RenderFrame
+    parameterSpace:
+      taskParameterDefinitions:
+        - name: Frame
+          type: INT
+          range: "1-3"
+    script:
+      actions:
+        onRun:
+          command: "{{ Param.BlenderExecutable }}"
+          args:
+            - --background
+            - --python
+            - "{{ Param.ScriptPath }}"
+            - --
+            - --frame
+            - "{{ Task.Param.Frame }}"
+            - --output-dir
+            - "{{ Param.OutputDir }}"

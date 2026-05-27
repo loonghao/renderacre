@@ -1,0 +1,6 @@
+/target/
+/.venv/
+/.maturin/
+*.pyd
+*.pyc
+__pycache__/
