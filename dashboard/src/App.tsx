@@ -6,8 +6,15 @@ import { OpenJdView, SettingsView } from "./components/SecondaryViews";
 import { Metrics, Sidebar, Topbar } from "./components/Shell";
 import { WorkersView } from "./components/Workers";
 import { sampleSnapshot } from "./data/sampleData";
-import { findWorker, inferApplication, initialInspectorTab, initialView, normalizeSnapshot, viewTitle } from "./lib/jobs";
-import type { DashboardSnapshot, InspectorTab, View } from "./types";
+import {
+  findWorker,
+  inferApplication,
+  initialInspectorTab,
+  initialView,
+  normalizeSnapshot,
+  viewTitle
+} from "./lib/jobs";
+import type { ApiJob, ApiTask, DashboardSnapshot, InspectorTab, JobAction, TaskAction, View } from "./types";
 
 export function App() {
   const apiBase = import.meta.env.VITE_RENDERACRE_API_BASE ?? "";
@@ -37,6 +44,34 @@ export function App() {
       setSelectedWorkerId((current) => current || sampleSnapshot.workers[0]?.id || "");
       setSource("sample");
     }
+  }
+
+  async function postAction(path: string, body?: unknown) {
+    const response = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`action failed: ${response.status}`);
+    await loadDashboard();
+  }
+
+  async function runJobAction(action: JobAction, job: ApiJob) {
+    if (action === "cancel" && !window.confirm(`Cancel job ${job.name}?`)) return;
+    if (action === "priority") {
+      const value = window.prompt("Priority", String(job.priority));
+      if (value === null) return;
+      const priority = Number.parseInt(value, 10);
+      if (Number.isNaN(priority)) return;
+      await postAction(`/v1/jobs/${job.id}/priority`, { priority });
+      return;
+    }
+    await postAction(`/v1/jobs/${job.id}/${action}`);
+  }
+
+  async function runTaskAction(action: TaskAction, task: ApiTask) {
+    if (action === "cancel" && !window.confirm(`Cancel task ${task.name}?`)) return;
+    await postAction(`/v1/tasks/${task.id}/${action}`);
   }
 
   useEffect(() => {
@@ -87,6 +122,8 @@ export function App() {
                   apiBase={apiBase}
                   job={selectedJob}
                   logs={snapshot.logs}
+                  onJobAction={runJobAction}
+                  onTaskAction={runTaskAction}
                   worker={findWorker(snapshot.workers, selectedJob)}
                   tab={inspectorTab}
                   setTab={setInspectorTab}

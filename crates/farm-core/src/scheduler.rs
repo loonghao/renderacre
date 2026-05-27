@@ -31,6 +31,8 @@ pub enum FarmError {
     },
     #[error("invalid submission: {0}")]
     InvalidSubmission(String),
+    #[error("invalid state transition: {0}")]
+    InvalidState(String),
     #[error("lease is invalid or expired")]
     InvalidLease,
     #[error("scheduler lock was poisoned")]
@@ -281,6 +283,92 @@ impl InMemoryScheduler {
         Ok(worker.clone())
     }
 
+    pub fn pause_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        match job.state {
+            JobState::Queued | JobState::Running => {
+                job.state = JobState::Paused;
+                job.updated_at = Utc::now();
+            }
+            JobState::Paused => {}
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled => {
+                return Err(FarmError::InvalidState(format!(
+                    "job '{}' cannot be paused from state {:?}",
+                    job.id, job.state
+                )));
+            }
+        }
+        Ok(job.clone())
+    }
+
+    pub fn resume_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        match job.state {
+            JobState::Paused => update_job_state(job),
+            JobState::Queued | JobState::Running => {}
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled => {
+                return Err(FarmError::InvalidState(format!(
+                    "job '{}' cannot be resumed from state {:?}",
+                    job.id, job.state
+                )));
+            }
+        }
+        Ok(job.clone())
+    }
+
+    pub fn cancel_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        if job.state == JobState::Cancelled {
+            return Ok(job.clone());
+        }
+        if job.state == JobState::Succeeded {
+            return Err(FarmError::InvalidState(format!(
+                "job '{}' cannot be cancelled after success",
+                job.id
+            )));
+        }
+        let now = Utc::now();
+        job.state = JobState::Cancelled;
+        job.updated_at = now;
+        for task in &mut job.tasks {
+            if !matches!(
+                task.state,
+                TaskState::Succeeded | TaskState::Failed | TaskState::Cancelled
+            ) {
+                task.state = TaskState::Cancelled;
+                task.updated_at = now;
+                task.completed_at = Some(now);
+                if task.lease.is_none() {
+                    task.started_at = None;
+                }
+            }
+        }
+        Ok(job.clone())
+    }
+
+    pub fn update_job_priority(&self, job_id: JobId, priority: i32) -> Result<Job, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        job.priority = priority;
+        job.updated_at = Utc::now();
+        Ok(job.clone())
+    }
+
     pub fn lease_task(&self, worker_id: WorkerId) -> Result<Option<TaskLease>, FarmError> {
         let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
         let worker = state
@@ -367,6 +455,72 @@ impl InMemoryScheduler {
         }))
     }
 
+    pub fn cancel_task(&self, task_id: TaskId) -> Result<Task, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let (job_id, task_index) = find_task_location(&state, task_id)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        let task = job
+            .tasks
+            .get_mut(task_index)
+            .ok_or(FarmError::TaskNotFound(task_id))?;
+        match task.state {
+            TaskState::Pending | TaskState::Leased | TaskState::Running => {
+                task.state = TaskState::Cancelled;
+                task.updated_at = Utc::now();
+                task.completed_at = Some(Utc::now());
+                if task.lease.is_none() {
+                    task.started_at = None;
+                }
+            }
+            TaskState::Cancelled => {}
+            TaskState::Succeeded | TaskState::Failed => {
+                return Err(FarmError::InvalidState(format!(
+                    "task '{}' cannot be cancelled from state {:?}",
+                    task.id, task.state
+                )));
+            }
+        }
+        let task = task.clone();
+        update_job_state(job);
+        Ok(task)
+    }
+
+    pub fn requeue_task(&self, task_id: TaskId) -> Result<Task, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let (job_id, task_index) = find_task_location(&state, task_id)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        let task = job
+            .tasks
+            .get_mut(task_index)
+            .ok_or(FarmError::TaskNotFound(task_id))?;
+        match task.state {
+            TaskState::Pending | TaskState::Failed | TaskState::Cancelled => {
+                task.state = TaskState::Pending;
+                task.attempts = 0;
+                task.lease = None;
+                task.started_at = None;
+                task.completed_at = None;
+                task.last_exit_code = None;
+                task.updated_at = Utc::now();
+            }
+            TaskState::Leased | TaskState::Running | TaskState::Succeeded => {
+                return Err(FarmError::InvalidState(format!(
+                    "task '{}' cannot be requeued from state {:?}",
+                    task.id, task.state
+                )));
+            }
+        }
+        let task = task.clone();
+        update_job_state(job);
+        Ok(task)
+    }
+
     pub fn mark_task_started(
         &self,
         task_id: TaskId,
@@ -444,6 +598,14 @@ impl InMemoryScheduler {
             .get_mut(task_index)
             .ok_or(FarmError::TaskNotFound(task_id))?;
         validate_lease(task, completion.worker_id, &completion.lease_token)?;
+        let job_was_paused = job.state == JobState::Paused;
+
+        if task.state == TaskState::Cancelled {
+            task.completed_at = Some(Utc::now());
+            task.updated_at = Utc::now();
+            task.lease = None;
+            return Ok(task.clone());
+        }
 
         task.completed_at = Some(Utc::now());
         task.updated_at = Utc::now();
@@ -464,6 +626,9 @@ impl InMemoryScheduler {
 
         let task = task.clone();
         update_job_state(job);
+        if job_was_paused && matches!(job.state, JobState::Queued | JobState::Running) {
+            job.state = JobState::Paused;
+        }
         let level = if completion.exit_code == 0 {
             LogLevel::Info
         } else {
@@ -574,6 +739,30 @@ impl SqliteScheduler {
         batch: WorkerLogBatch,
     ) -> Result<Vec<FarmLogEntry>, FarmError> {
         self.write_durably(|inner| inner.record_worker_logs(worker_id, batch))
+    }
+
+    pub fn pause_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        self.write_durably(|inner| inner.pause_job(job_id))
+    }
+
+    pub fn resume_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        self.write_durably(|inner| inner.resume_job(job_id))
+    }
+
+    pub fn cancel_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        self.write_durably(|inner| inner.cancel_job(job_id))
+    }
+
+    pub fn update_job_priority(&self, job_id: JobId, priority: i32) -> Result<Job, FarmError> {
+        self.write_durably(|inner| inner.update_job_priority(job_id, priority))
+    }
+
+    pub fn cancel_task(&self, task_id: TaskId) -> Result<Task, FarmError> {
+        self.write_durably(|inner| inner.cancel_task(task_id))
+    }
+
+    pub fn requeue_task(&self, task_id: TaskId) -> Result<Task, FarmError> {
+        self.write_durably(|inner| inner.requeue_task(task_id))
     }
 
     pub fn register_worker(&self, registration: WorkerRegister) -> Result<WorkerInfo, FarmError> {
@@ -894,6 +1083,12 @@ fn update_job_state(job: &mut Job) {
     } else if job
         .tasks
         .iter()
+        .all(|task| task.state == TaskState::Cancelled)
+    {
+        JobState::Cancelled
+    } else if job
+        .tasks
+        .iter()
         .all(|task| task.state == TaskState::Succeeded)
     {
         JobState::Succeeded
@@ -920,6 +1115,7 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
         match job.state {
             JobState::Queued => stats.jobs_queued += 1,
             JobState::Running => stats.jobs_running += 1,
+            JobState::Paused => stats.jobs_paused += 1,
             JobState::Succeeded => stats.jobs_succeeded += 1,
             JobState::Failed => stats.jobs_failed += 1,
             JobState::Cancelled => {}
@@ -1430,6 +1626,131 @@ mod tests {
         assert!(scheduler.lease_task(worker.id).unwrap().is_some());
     }
 
+    #[test]
+    fn paused_jobs_do_not_lease_until_resumed() {
+        let scheduler = InMemoryScheduler::default();
+        let job = scheduler
+            .submit_job(JobSubmit {
+                name: "pause-demo".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    requirements: Default::default(),
+                    max_retries: None,
+                    artifact_paths: Vec::new(),
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "local".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register");
+
+        assert_eq!(scheduler.pause_job(job.id).unwrap().state, JobState::Paused);
+        assert!(scheduler.lease_task(worker.id).unwrap().is_none());
+        assert_eq!(
+            scheduler.resume_job(job.id).unwrap().state,
+            JobState::Queued
+        );
+        assert!(scheduler.lease_task(worker.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn cancel_and_requeue_task_are_idempotent_state_transitions() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "task-actions".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    requirements: Default::default(),
+                    max_retries: None,
+                    artifact_paths: Vec::new(),
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let task_id = scheduler.list_jobs().unwrap()[0].tasks[0].id;
+
+        assert_eq!(
+            scheduler.cancel_task(task_id).unwrap().state,
+            TaskState::Cancelled
+        );
+        assert_eq!(
+            scheduler.cancel_task(task_id).unwrap().state,
+            TaskState::Cancelled
+        );
+        let requeued = scheduler.requeue_task(task_id).unwrap();
+        assert_eq!(requeued.state, TaskState::Pending);
+        assert_eq!(requeued.attempts, 0);
+    }
+
+    #[test]
+    fn failed_tasks_can_be_requeued_and_priority_can_change() {
+        let scheduler = InMemoryScheduler::default();
+        let job = scheduler
+            .submit_job(JobSubmit {
+                name: "retry-demo".to_string(),
+                priority: 1,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    requirements: Default::default(),
+                    max_retries: None,
+                    artifact_paths: Vec::new(),
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = scheduler
+            .register_worker(WorkerRegister {
+                name: "local".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register");
+        let lease = scheduler.lease_task(worker.id).unwrap().unwrap();
+        scheduler
+            .complete_task(
+                lease.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token,
+                    exit_code: 1,
+                    stdout_tail: None,
+                    stderr_tail: Some("failed".to_string()),
+                    artifacts: Vec::new(),
+                },
+            )
+            .expect("task should fail");
+
+        assert_eq!(scheduler.get_job(job.id).unwrap().state, JobState::Failed);
+        assert_eq!(
+            scheduler.requeue_task(lease.task.id).unwrap().state,
+            TaskState::Pending
+        );
+        assert_eq!(scheduler.get_job(job.id).unwrap().state, JobState::Queued);
+        assert_eq!(
+            scheduler.update_job_priority(job.id, 10).unwrap().priority,
+            10
+        );
+    }
     fn command(executable: &str) -> CommandSpec {
         CommandSpec {
             executable: executable.to_string(),

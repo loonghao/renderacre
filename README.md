@@ -144,6 +144,17 @@ payloads:
 Workers advertise matching capabilities with labels such as
 `--label os=windows --label app=maya --label pool=lighting`.
 
+Common queue operations are available as stable action endpoints:
+
+```text
+POST /v1/jobs/{job_id}/pause
+POST /v1/jobs/{job_id}/resume
+POST /v1/jobs/{job_id}/cancel
+POST /v1/jobs/{job_id}/priority
+POST /v1/tasks/{task_id}/cancel
+POST /v1/tasks/{task_id}/requeue
+```
+
 ## Python Submitter API
 
 Install a local build:

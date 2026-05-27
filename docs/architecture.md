@@ -23,6 +23,12 @@ Core endpoints:
 - `POST /v1/workers/register`: register a worker.
 - `POST /v1/workers/{worker_id}/heartbeat`: keep worker online.
 - `POST /v1/workers/{worker_id}/lease`: get the next runnable task.
+- `POST /v1/jobs/{job_id}/pause`: temporarily stop leasing pending work.
+- `POST /v1/jobs/{job_id}/resume`: resume leasing a paused job.
+- `POST /v1/jobs/{job_id}/cancel`: cancel remaining job work.
+- `POST /v1/jobs/{job_id}/priority`: update queue priority.
+- `POST /v1/tasks/{task_id}/cancel`: cancel a selected task.
+- `POST /v1/tasks/{task_id}/requeue`: retry or requeue a selected task.
 - `POST /v1/tasks/{task_id}/started`: mark a leased task as running.
 - `POST /v1/tasks/{task_id}/renew`: extend a healthy in-flight task lease.
 - `POST /v1/tasks/{task_id}/complete`: report result and trigger retry/final state.
@@ -41,6 +47,9 @@ Task routing is schema-driven and backward-compatible. A task may require worker
 labels and one of several pools; workers advertise those capabilities during
 registration. Unconstrained tasks keep the previous behavior and can run on any
 worker.
+
+Lifecycle actions are idempotent where repeating the same request is safe, and
+invalid state transitions return a conflict response with a descriptive error.
 
 ## OpenJD path
 
