@@ -19,7 +19,14 @@ Core endpoints:
 - `POST /v1/workers/{worker_id}/heartbeat`: keep worker online.
 - `POST /v1/workers/{worker_id}/lease`: get the next runnable task.
 - `POST /v1/tasks/{task_id}/started`: mark a leased task as running.
+- `POST /v1/tasks/{task_id}/renew`: extend a healthy in-flight task lease.
 - `POST /v1/tasks/{task_id}/complete`: report result and trigger retry/final state.
+
+Task leases have a configurable controller-side TTL. Workers renew leases while
+direct command and OpenJD tasks are still executing, so long-running work is not
+dispatched twice while its worker remains healthy. If a worker disappears and no
+renewal arrives before expiry, the scheduler recovers the task on the next lease
+scan according to the retry path.
 
 ## OpenJD path
 

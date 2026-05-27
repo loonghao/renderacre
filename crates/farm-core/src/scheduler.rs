@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::models::{
     DashboardSnapshot, FarmStats, Job, JobId, JobState, JobSubmit, Task, TaskComplete, TaskId,
-    TaskLease, TaskLeaseInfo, TaskStarted, TaskState, TaskSubmit, WorkerId, WorkerInfo,
-    WorkerRegister, WorkerState,
+    TaskLease, TaskLeaseInfo, TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerId,
+    WorkerInfo, WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -31,6 +31,20 @@ pub enum FarmError {
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryScheduler {
     inner: Arc<Mutex<SchedulerState>>,
+    config: SchedulerConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct SchedulerConfig {
+    pub lease_ttl_seconds: i64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            lease_ttl_seconds: 120,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +54,13 @@ struct SchedulerState {
 }
 
 impl InMemoryScheduler {
+    pub fn with_config(config: SchedulerConfig) -> Self {
+        Self {
+            inner: Arc::default(),
+            config,
+        }
+    }
+
     pub fn submit_job(&self, submission: JobSubmit) -> Result<Job, FarmError> {
         let mut tasks = submission.tasks;
         if tasks.is_empty() {
@@ -209,7 +230,7 @@ impl InMemoryScheduler {
                 token: lease_token.clone(),
                 worker_id,
                 leased_at: now,
-                expires_at: now + Duration::seconds(120),
+                expires_at: now + self.lease_ttl(),
             });
             task.clone()
         };
@@ -243,6 +264,31 @@ impl InMemoryScheduler {
         let task = task.clone();
         update_job_state(job);
         Ok(task)
+    }
+
+    pub fn renew_task_lease(
+        &self,
+        task_id: TaskId,
+        renewal: TaskLeaseRenewal,
+    ) -> Result<Task, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let (job_id, task_index) = find_task_location(&state, task_id)?;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(FarmError::JobNotFound(job_id))?;
+        let task = job
+            .tasks
+            .get_mut(task_index)
+            .ok_or(FarmError::TaskNotFound(task_id))?;
+        validate_lease(task, renewal.worker_id, &renewal.lease_token)?;
+
+        let now = Utc::now();
+        if let Some(lease) = &mut task.lease {
+            lease.expires_at = now + self.lease_ttl();
+        }
+        task.updated_at = now;
+        Ok(task.clone())
     }
 
     pub fn complete_task(
@@ -281,6 +327,10 @@ impl InMemoryScheduler {
         let task = task.clone();
         update_job_state(job);
         Ok(task)
+    }
+
+    fn lease_ttl(&self) -> Duration {
+        Duration::seconds(self.config.lease_ttl_seconds.max(1))
     }
 }
 
@@ -451,7 +501,9 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{CommandSpec, WorkerCapacity};
+    use crate::models::{
+        CommandSpec, TaskLease, TaskLeaseRenewal, WorkerCapacity, WorkerId, WorkerInfo,
+    };
 
     use super::*;
 
@@ -553,6 +605,59 @@ mod tests {
         assert_eq!(snapshot.workers[0].name, "render-node-01");
     }
 
+    #[test]
+    fn renews_task_lease_before_it_expires() {
+        let scheduler = InMemoryScheduler::with_config(SchedulerConfig {
+            lease_ttl_seconds: 300,
+        });
+        let worker = register_worker(&scheduler);
+        let lease = lease_single_task(&scheduler, worker.id);
+        let original_expires_at = lease.task.lease.as_ref().unwrap().expires_at;
+
+        let renewed = scheduler
+            .renew_task_lease(
+                lease.task.id,
+                TaskLeaseRenewal {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token,
+                },
+            )
+            .expect("lease should renew");
+
+        assert_eq!(renewed.state, TaskState::Leased);
+        assert!(renewed.lease.unwrap().expires_at >= original_expires_at);
+    }
+
+    #[test]
+    fn rejects_stale_task_lease_renewal() {
+        let scheduler = InMemoryScheduler::with_config(SchedulerConfig {
+            lease_ttl_seconds: 300,
+        });
+        let worker = register_worker(&scheduler);
+        let lease = lease_single_task(&scheduler, worker.id);
+
+        {
+            let mut state = scheduler.inner.lock().unwrap();
+            let job = state.jobs.values_mut().next().unwrap();
+            let task = job
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == lease.task.id)
+                .unwrap();
+            task.lease.as_mut().unwrap().expires_at = Utc::now() - Duration::seconds(1);
+        }
+
+        let result = scheduler.renew_task_lease(
+            lease.task.id,
+            TaskLeaseRenewal {
+                worker_id: worker.id,
+                lease_token: lease.lease_token,
+            },
+        );
+
+        assert!(matches!(result, Err(FarmError::InvalidLease)));
+    }
+
     fn command(executable: &str) -> CommandSpec {
         CommandSpec {
             executable: executable.to_string(),
@@ -561,5 +666,37 @@ mod tests {
             working_dir: None,
             timeout_seconds: None,
         }
+    }
+
+    fn register_worker(scheduler: &InMemoryScheduler) -> WorkerInfo {
+        scheduler
+            .register_worker(WorkerRegister {
+                name: "local".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity::default(),
+            })
+            .expect("worker should register")
+    }
+
+    fn lease_single_task(scheduler: &InMemoryScheduler, worker_id: WorkerId) -> TaskLease {
+        scheduler
+            .submit_job(JobSubmit {
+                name: "lease-demo".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    max_retries: None,
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        scheduler
+            .lease_task(worker_id)
+            .expect("lease should work")
+            .expect("a task should be leased")
     }
 }

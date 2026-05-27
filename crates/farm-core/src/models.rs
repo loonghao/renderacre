@@ -517,6 +517,12 @@ pub struct TaskStarted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskLeaseRenewal {
+    pub worker_id: WorkerId,
+    pub lease_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskComplete {
     pub worker_id: WorkerId,
     pub lease_token: String,

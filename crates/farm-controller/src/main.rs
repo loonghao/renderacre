@@ -7,8 +7,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use farm_core::{
-    DashboardSnapshot, FarmError, FarmStats, InMemoryScheduler, Job, JobId, JobSubmit, Task,
-    TaskComplete, TaskId, TaskLease, TaskStarted, WorkerId, WorkerInfo, WorkerRegister,
+    DashboardSnapshot, FarmError, FarmStats, InMemoryScheduler, Job, JobId, JobSubmit,
+    SchedulerConfig, Task, TaskComplete, TaskId, TaskLease, TaskLeaseRenewal, TaskStarted,
+    WorkerId, WorkerInfo, WorkerRegister,
 };
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -18,6 +19,8 @@ use tower_http::trace::TraceLayer;
 struct Args {
     #[arg(long, env = "RFARM_BIND", default_value = "127.0.0.1:7878")]
     bind: SocketAddr,
+    #[arg(long, env = "RFARM_LEASE_SECONDS", default_value_t = 120)]
+    lease_seconds: i64,
 }
 
 #[tokio::main]
@@ -32,7 +35,13 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     tracing::info!("controller listening on http://{}", args.bind);
-    axum::serve(listener, app(InMemoryScheduler::default())).await?;
+    axum::serve(
+        listener,
+        app(InMemoryScheduler::with_config(SchedulerConfig {
+            lease_ttl_seconds: args.lease_seconds,
+        })),
+    )
+    .await?;
     Ok(())
 }
 
@@ -48,6 +57,7 @@ fn app(scheduler: InMemoryScheduler) -> Router {
         .route("/v1/workers/{worker_id}/heartbeat", post(heartbeat_worker))
         .route("/v1/workers/{worker_id}/lease", post(lease_task))
         .route("/v1/tasks/{task_id}/started", post(mark_task_started))
+        .route("/v1/tasks/{task_id}/renew", post(renew_task_lease))
         .route("/v1/tasks/{task_id}/complete", post(complete_task))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -121,6 +131,14 @@ async fn mark_task_started(
     Json(started): Json<TaskStarted>,
 ) -> Result<Json<Task>, ApiError> {
     Ok(Json(scheduler.mark_task_started(task_id, started)?))
+}
+
+async fn renew_task_lease(
+    State(scheduler): State<InMemoryScheduler>,
+    Path(task_id): Path<TaskId>,
+    Json(renewal): Json<TaskLeaseRenewal>,
+) -> Result<Json<Task>, ApiError> {
+    Ok(Json(scheduler.renew_task_lease(task_id, renewal)?))
 }
 
 async fn complete_task(
