@@ -16,17 +16,75 @@ on:
         options: ["false", "true"]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
+  build-binaries:
+    name: Build binaries (${{ matrix.asset_suffix }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_suffix: linux-x86_64
+            archive: tar.gz
+          - os: macos-13
+            asset_suffix: macos-x86_64
+            archive: tar.gz
+          - os: macos-latest
+            asset_suffix: macos-arm64
+            archive: tar.gz
+          - os: windows-latest
+            asset_suffix: windows-x86_64
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build controller and worker
+        run: cargo build --release -p renderacre-controller -p renderacre-worker --locked
+
+      - name: Package binaries (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="renderacre-${GITHUB_REF_NAME}-${{ matrix.asset_suffix }}"
+          mkdir -p "dist-bin/${bundle}"
+          cp "target/release/renderacre-controller" "dist-bin/${bundle}/"
+          cp "target/release/renderacre-worker" "dist-bin/${bundle}/"
+          cp README.md LICENSE LICENSE-APACHE LICENSE-MIT "dist-bin/${bundle}/"
+          tar -C dist-bin -czf "dist-bin/${bundle}.tar.gz" "${bundle}"
+          rm -rf "dist-bin/${bundle}"
+
+      - name: Package binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = "renderacre-$env:GITHUB_REF_NAME-${{ matrix.asset_suffix }}"
+          New-Item -ItemType Directory -Force -Path "dist-bin\$bundle" | Out-Null
+          Copy-Item "target\release\renderacre-controller.exe" "dist-bin\$bundle\"
+          Copy-Item "target\release\renderacre-worker.exe" "dist-bin\$bundle\"
+          Copy-Item README.md,LICENSE,LICENSE-APACHE,LICENSE-MIT "dist-bin\$bundle\"
+          Compress-Archive -Path "dist-bin\$bundle" -DestinationPath "dist-bin\$bundle.zip" -Force
+          Remove-Item -Recurse -Force "dist-bin\$bundle"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renderacre-bin-${{ matrix.asset_suffix }}
+          path: dist-bin/*
+
   build-wheels:
     name: Build wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-13, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -80,3 +138,25 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
+
+  publish-github-release:
+    name: Publish GitHub Release assets
+    needs: [build-binaries, build-wheels, sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-from-tag
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber

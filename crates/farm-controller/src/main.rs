@@ -7,10 +7,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use farm_core::{
-    FarmError, InMemoryScheduler, Job, JobId, JobSubmit, Task, TaskComplete, TaskId, TaskLease,
-    TaskStarted, WorkerId, WorkerInfo, WorkerRegister,
+    DashboardSnapshot, FarmError, FarmStats, InMemoryScheduler, Job, JobId, JobSubmit, Task,
+    TaskComplete, TaskId, TaskLease, TaskStarted, WorkerId, WorkerInfo, WorkerRegister,
 };
 use serde_json::json;
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 #[derive(Debug, Parser)]
@@ -38,13 +39,17 @@ async fn main() -> anyhow::Result<()> {
 fn app(scheduler: InMemoryScheduler) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/jobs", post(submit_job))
+        .route("/v1/dashboard", get(get_dashboard))
+        .route("/v1/stats", get(get_stats))
+        .route("/v1/jobs", get(list_jobs).post(submit_job))
         .route("/v1/jobs/{job_id}", get(get_job))
+        .route("/v1/workers", get(list_workers))
         .route("/v1/workers/register", post(register_worker))
         .route("/v1/workers/{worker_id}/heartbeat", post(heartbeat_worker))
         .route("/v1/workers/{worker_id}/lease", post(lease_task))
         .route("/v1/tasks/{task_id}/started", post(mark_task_started))
         .route("/v1/tasks/{task_id}/complete", post(complete_task))
+        .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(scheduler)
 }
@@ -60,11 +65,33 @@ async fn submit_job(
     Ok(Json(scheduler.submit_job(submission)?))
 }
 
+async fn list_jobs(State(scheduler): State<InMemoryScheduler>) -> Result<Json<Vec<Job>>, ApiError> {
+    Ok(Json(scheduler.list_jobs()?))
+}
+
 async fn get_job(
     State(scheduler): State<InMemoryScheduler>,
     Path(job_id): Path<JobId>,
 ) -> Result<Json<Job>, ApiError> {
     Ok(Json(scheduler.get_job(job_id)?))
+}
+
+async fn list_workers(
+    State(scheduler): State<InMemoryScheduler>,
+) -> Result<Json<Vec<WorkerInfo>>, ApiError> {
+    Ok(Json(scheduler.list_workers()?))
+}
+
+async fn get_stats(
+    State(scheduler): State<InMemoryScheduler>,
+) -> Result<Json<FarmStats>, ApiError> {
+    Ok(Json(scheduler.dashboard_snapshot()?.stats))
+}
+
+async fn get_dashboard(
+    State(scheduler): State<InMemoryScheduler>,
+) -> Result<Json<DashboardSnapshot>, ApiError> {
+    Ok(Json(scheduler.dashboard_snapshot()?))
 }
 
 async fn register_worker(

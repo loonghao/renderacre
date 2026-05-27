@@ -46,3 +46,11 @@ Keeping Python at the API edge lets DCC submitters stay pleasant while Rust owns
 ## Deployment shape
 
 The recommended first production shape is a private controller behind an authenticated proxy plus one worker process per render node. OpenJD `PATH` parameters should point at shared storage for scenes, scripts, and output directories. The current scheduler keeps state in memory; SQLite/Postgres/NATS can replace `InMemoryScheduler` later behind the same REST and Python contracts.
+
+## Dashboard path
+
+`dashboard/` is a Vite React application for queue operations. It reads `/v1/dashboard`, `/v1/jobs`, `/v1/workers`, and `/v1/stats`, then renders a Deadline-style queue table, worker assignment panel, OpenJD step detail, dependency mini graph, and stdout tail. During local development Vite proxies `/v1` to the controller; in deployment, serve the built static assets from `dashboard/dist` beside the controller API.
+
+## Release assets
+
+GitHub Releases build standalone `renderacre-controller` and `renderacre-worker` archives for Linux, macOS, and Windows. `scripts/install.sh` and `scripts/install.ps1` resolve the latest release by default and install both executables into a user-local bin directory.

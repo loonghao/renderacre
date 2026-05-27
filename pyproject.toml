@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "renderacre"
-version = "0.1.0"
+version = "0.1.1"
 description = "Rust render-farm controller, worker, and Python bindings"
 requires-python = ">=3.7"
 readme = "README.md"
@@ -36,3 +36,8 @@ Changelog = "https://github.com/loonghao/renderacre/blob/main/CHANGELOG.md"
 manifest-path = "crates/farm-python/Cargo.toml"
 module-name = "renderacre"
 features = ["extension-module"]
+include = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "LICENSE-APACHE", format = "sdist" },
+    { path = "LICENSE-MIT", format = "sdist" },
+]

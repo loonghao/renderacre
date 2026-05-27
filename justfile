@@ -15,4 +15,7 @@ wheel:
 e2e:
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_smoke.ps1
 
-preflight: fmt clippy test e2e wheel
+bins:
+    cargo build --release -p renderacre-controller -p renderacre-worker
+
+preflight: fmt clippy test e2e wheel bins

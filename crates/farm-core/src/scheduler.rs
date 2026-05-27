@@ -6,8 +6,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    Job, JobId, JobState, JobSubmit, Task, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
-    TaskStarted, TaskState, TaskSubmit, WorkerId, WorkerInfo, WorkerRegister, WorkerState,
+    DashboardSnapshot, FarmStats, Job, JobId, JobState, JobSubmit, Task, TaskComplete, TaskId,
+    TaskLease, TaskLeaseInfo, TaskStarted, TaskState, TaskSubmit, WorkerId, WorkerInfo,
+    WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -100,6 +101,33 @@ impl InMemoryScheduler {
             .get(&job_id)
             .cloned()
             .ok_or(FarmError::JobNotFound(job_id))
+    }
+
+    pub fn list_jobs(&self) -> Result<Vec<Job>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let mut jobs = state.jobs.values().cloned().collect::<Vec<_>>();
+        jobs.sort_by_key(|job| std::cmp::Reverse((job.priority, job.created_at)));
+        Ok(jobs)
+    }
+
+    pub fn list_workers(&self) -> Result<Vec<WorkerInfo>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let mut workers = state.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(workers)
+    }
+
+    pub fn dashboard_snapshot(&self) -> Result<DashboardSnapshot, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let mut jobs = state.jobs.values().cloned().collect::<Vec<_>>();
+        jobs.sort_by_key(|job| std::cmp::Reverse((job.priority, job.created_at)));
+        let mut workers = state.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(DashboardSnapshot {
+            stats: compute_stats(&state),
+            jobs,
+            workers,
+        })
     }
 
     pub fn register_worker(&self, registration: WorkerRegister) -> Result<WorkerInfo, FarmError> {
@@ -382,6 +410,45 @@ fn update_job_state(job: &mut Job) {
     };
 }
 
+fn compute_stats(state: &SchedulerState) -> FarmStats {
+    let mut stats = FarmStats {
+        jobs_total: state.jobs.len(),
+        workers_total: state.workers.len(),
+        ..FarmStats::default()
+    };
+
+    for job in state.jobs.values() {
+        match job.state {
+            JobState::Queued => stats.jobs_queued += 1,
+            JobState::Running => stats.jobs_running += 1,
+            JobState::Succeeded => stats.jobs_succeeded += 1,
+            JobState::Failed => stats.jobs_failed += 1,
+            JobState::Cancelled => {}
+        }
+        for task in &job.tasks {
+            stats.tasks_total += 1;
+            match task.state {
+                TaskState::Pending => stats.tasks_pending += 1,
+                TaskState::Leased => stats.tasks_leased += 1,
+                TaskState::Running => stats.tasks_running += 1,
+                TaskState::Succeeded => stats.tasks_succeeded += 1,
+                TaskState::Failed => stats.tasks_failed += 1,
+                TaskState::Cancelled => {}
+            }
+        }
+    }
+
+    for worker in state.workers.values() {
+        stats.worker_slots += worker.capacity.slots;
+        match worker.state {
+            WorkerState::Online => stats.workers_online += 1,
+            WorkerState::Offline => stats.workers_offline += 1,
+        }
+    }
+
+    stats
+}
+
 #[cfg(test)]
 mod tests {
     use crate::models::{CommandSpec, WorkerCapacity};
@@ -446,6 +513,44 @@ mod tests {
             .expect("next task should be leased");
         assert_eq!(second.task.name, "render");
         assert_eq!(scheduler.get_job(job.id).unwrap().state, JobState::Running);
+    }
+
+    #[test]
+    fn dashboard_snapshot_reports_queue_and_worker_stats() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "stats-demo".to_string(),
+                priority: 3,
+                max_retries: 0,
+                tasks: vec![TaskSubmit {
+                    name: "main".to_string(),
+                    command: command("echo"),
+                    dependencies: vec![],
+                    max_retries: None,
+                    openjd: None,
+                }],
+                openjd: None,
+            })
+            .expect("job should submit");
+        scheduler
+            .register_worker(WorkerRegister {
+                name: "render-node-01".to_string(),
+                labels: HashMap::new(),
+                capacity: WorkerCapacity { slots: 4 },
+            })
+            .expect("worker should register");
+
+        let snapshot = scheduler
+            .dashboard_snapshot()
+            .expect("snapshot should be available");
+        assert_eq!(snapshot.stats.jobs_total, 1);
+        assert_eq!(snapshot.stats.jobs_queued, 1);
+        assert_eq!(snapshot.stats.tasks_pending, 1);
+        assert_eq!(snapshot.stats.workers_online, 1);
+        assert_eq!(snapshot.stats.worker_slots, 4);
+        assert_eq!(snapshot.jobs[0].name, "stats-demo");
+        assert_eq!(snapshot.workers[0].name, "render-node-01");
     }
 
     fn command(executable: &str) -> CommandSpec {

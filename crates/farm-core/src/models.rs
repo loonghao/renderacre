@@ -390,6 +390,32 @@ pub struct Job {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardSnapshot {
+    pub stats: FarmStats,
+    pub jobs: Vec<Job>,
+    pub workers: Vec<WorkerInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FarmStats {
+    pub jobs_total: usize,
+    pub jobs_queued: usize,
+    pub jobs_running: usize,
+    pub jobs_succeeded: usize,
+    pub jobs_failed: usize,
+    pub tasks_total: usize,
+    pub tasks_pending: usize,
+    pub tasks_leased: usize,
+    pub tasks_running: usize,
+    pub tasks_succeeded: usize,
+    pub tasks_failed: usize,
+    pub workers_total: usize,
+    pub workers_online: usize,
+    pub workers_offline: usize,
+    pub worker_slots: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
     pub job_id: JobId,

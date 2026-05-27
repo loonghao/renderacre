@@ -426,24 +426,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "farm-controller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "farm-core",
- "serde_json",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "farm-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "openjd-expr",
@@ -452,25 +436,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "farm-worker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "farm-core",
- "openjd-expr",
- "openjd-model",
- "openjd-sessions",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -1570,13 +1535,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "renderacre-controller"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "farm-core",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "renderacre-python"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "farm-core",
  "pyo3",
  "reqwest",
  "serde_json",
+]
+
+[[package]]
+name = "renderacre-worker"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "farm-core",
+ "openjd-expr",
+ "openjd-model",
+ "openjd-sessions",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

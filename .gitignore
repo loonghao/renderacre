@@ -1,6 +1,9 @@
 /target/
 /.venv/
 /.maturin/
+/dashboard/dist/
+/dashboard/node_modules/
+/dashboard/tsconfig.tsbuildinfo
 *.pyd
 *.pyc
 __pycache__/

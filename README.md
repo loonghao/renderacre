@@ -33,7 +33,7 @@ python -m maturin build --release -o target\wheels
 The wheel filename should contain `cp37-abi3`, for example:
 
 ```text
-renderacre-0.1.0-cp37-abi3-win_amd64.whl
+renderacre-0.1.1-cp37-abi3-win_amd64.whl
 ```
 
 ## Run a Local Farm
@@ -41,13 +41,13 @@ renderacre-0.1.0-cp37-abi3-win_amd64.whl
 Start the controller:
 
 ```powershell
-cargo run -p farm-controller -- --bind 127.0.0.1:7878
+cargo run -p renderacre-controller -- --bind 127.0.0.1:7878
 ```
 
 Start a worker:
 
 ```powershell
-cargo run -p farm-worker -- --controller http://127.0.0.1:7878 --name local-worker --label os=windows
+cargo run -p renderacre-worker -- --controller http://127.0.0.1:7878 --name local-worker --label os=windows
 ```
 
 Submit a direct command job:
@@ -119,6 +119,28 @@ The worker:
 
 Supported current extensions default to all extensions known by `openjd-model`: `EXPR`, `FEATURE_BUNDLE_1`, `TASK_CHUNKING`, and `REDACTED_ENV_VARS`.
 
+## Dashboard
+
+Renderacre includes a Vite + React dashboard under `dashboard/`. It uses shadcn-style components, compact queue tables, worker status panels, an OpenJD task inspector, and a stdout tail view.
+
+Run it during development:
+
+```powershell
+cargo run -p renderacre-controller -- --bind 127.0.0.1:7878
+cd dashboard
+npm ci
+npm run dev
+```
+
+The Vite dev server proxies `/v1` and `/healthz` to the controller. For a deployed dashboard:
+
+```powershell
+cd dashboard
+npm run build
+```
+
+Serve `dashboard/dist` through your internal web server or reverse proxy next to the controller API.
+
 ## DCC Examples
 
 Blender:
@@ -149,17 +171,34 @@ Pass the template and parameter JSON through `renderacre.openjd_job(...)` or sub
 
 Recommended first deployment shape:
 
-- Run one controller per farm or queue: `farm-controller --bind 0.0.0.0:7878`.
-- Run one worker process per render node: `farm-worker --controller http://controller-host:7878 --name <node-name> --label app=blender`.
+- Run one controller per farm or queue: `renderacre-controller --bind 0.0.0.0:7878`.
+- Run one worker process per render node: `renderacre-worker --controller http://controller-host:7878 --name <node-name> --label app=blender`.
 - Put the controller behind a private network or authenticated reverse proxy.
 - Keep render executables and scripts on shared storage, then pass `PATH` parameters through OpenJD.
 - Use GitHub Releases or PyPI to distribute the `renderacre` wheel to submitter machines.
 
 Current storage is in-memory by design for the first protocol slice. The scheduler boundary is isolated so SQLite/Postgres/NATS can replace it without changing the Python or REST APIs.
 
+### Install Binaries
+
+Linux/macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/loonghao/renderacre/main/scripts/install.ps1 -UseB | iex
+```
+
+Set `RENDERACRE_VERSION` / `-Version` and `RENDERACRE_INSTALL_DIR` / `-InstallDir` to pin a release or install path.
+
 ## Release
 
 The release workflow builds Linux, Windows, and macOS wheels plus an sdist. PyPI publishing uses Trusted Publishing through the `pypi` GitHub environment.
+It also uploads standalone controller/worker archives to GitHub Releases for Linux, macOS, and Windows.
 
 Manual release dry run:
 

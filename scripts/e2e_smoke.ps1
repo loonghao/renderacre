@@ -34,12 +34,12 @@ function Wait-Job([string]$JobId) {
 try {
     Push-Location $root
     $pushedLocation = $true
-    cargo build -p farm-controller -p farm-worker
+    cargo build -p renderacre-controller -p renderacre-worker
 
-    $controllerExe = Join-Path $root "target\debug\farm-controller.exe"
-    $workerExe = Join-Path $root "target\debug\farm-worker.exe"
-    if (-not (Test-Path $controllerExe)) { $controllerExe = Join-Path $root "target\debug\farm-controller" }
-    if (-not (Test-Path $workerExe)) { $workerExe = Join-Path $root "target\debug\farm-worker" }
+    $controllerExe = Join-Path $root "target\debug\renderacre-controller.exe"
+    $workerExe = Join-Path $root "target\debug\renderacre-worker.exe"
+    if (-not (Test-Path $controllerExe)) { $controllerExe = Join-Path $root "target\debug\renderacre-controller" }
+    if (-not (Test-Path $workerExe)) { $workerExe = Join-Path $root "target\debug\renderacre-worker" }
 
     $controllerArgs = @{
         FilePath = $controllerExe
