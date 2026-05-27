@@ -10,6 +10,8 @@ use farm_core::{
     TaskLeaseRenewal, TaskStarted, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch,
     WorkerLogInput, WorkerRegister,
 };
+use futures_util::future::{FutureExt, LocalBoxFuture};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use openjd_expr::SerializedSymbolTable;
 use openjd_model::{ModelExtension, ModelProfile, SpecificationRevision, TaskParameterSet};
 use openjd_sessions::{ActionState, Session, SessionConfig, StickyBitPolicy};
@@ -131,21 +133,38 @@ async fn main() -> Result<()> {
             None,
         )
         .await;
+    let slots = worker.capacity.slots.max(1) as usize;
+    let lease_renew_seconds = args.lease_renew_seconds.max(1);
+    let mut running = FuturesUnordered::<LocalBoxFuture<'static, Result<()>>>::new();
 
     loop {
         heartbeat(&client, &controller, worker.id).await?;
-        match lease_task(&client, &controller, worker.id).await? {
-            Some(lease) => {
-                run_lease(
-                    &client,
-                    &controller,
-                    &log_sink,
-                    lease,
-                    args.lease_renew_seconds.max(1),
-                )
-                .await?
+        while running.len() < slots {
+            let Some(lease) = lease_task(&client, &controller, worker.id).await? else {
+                break;
+            };
+            let client = client.clone();
+            let controller = controller.clone();
+            let log_sink = log_sink.clone();
+            running.push(
+                async move {
+                    run_lease(&client, &controller, &log_sink, lease, lease_renew_seconds).await
+                }
+                .boxed_local(),
+            );
+        }
+
+        if running.is_empty() {
+            tokio::time::sleep(Duration::from_secs(args.poll_seconds)).await;
+        } else {
+            tokio::select! {
+                result = running.next() => {
+                    if let Some(result) = result {
+                        result?;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(args.poll_seconds)) => {}
             }
-            None => tokio::time::sleep(Duration::from_secs(args.poll_seconds)).await,
         }
     }
 }
@@ -162,7 +181,9 @@ async fn register_worker(
         .json(&WorkerRegister {
             name,
             labels,
-            capacity: WorkerCapacity { slots: args.slots },
+            capacity: WorkerCapacity {
+                slots: args.slots.max(1),
+            },
         })
         .send()
         .await?

@@ -1616,6 +1616,7 @@ dependencies = [
  "chrono",
  "clap",
  "farm-core",
+ "futures-util",
  "openjd-expr",
  "openjd-model",
  "openjd-sessions",

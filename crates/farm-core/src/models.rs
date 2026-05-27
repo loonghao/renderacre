@@ -416,6 +416,10 @@ pub struct FarmStats {
     pub workers_online: usize,
     pub workers_offline: usize,
     pub worker_slots: u32,
+    #[serde(default)]
+    pub worker_slots_used: u32,
+    #[serde(default)]
+    pub worker_slots_available: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
