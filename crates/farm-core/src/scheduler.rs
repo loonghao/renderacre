@@ -9,11 +9,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    DashboardSnapshot, FarmLogEntry, FarmStats, Job, JobId, JobState, JobSubmit, LogLevel,
-    LogSource, OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition,
-    ResourceLimitSnapshot, Task, TaskArtifact, TaskAttempt, TaskAttemptState, TaskComplete, TaskId,
-    TaskLease, TaskLeaseInfo, TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity,
-    WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister, WorkerState,
+    AuditEvent, AuditEventInput, AuditOutcome, DashboardSnapshot, FarmLogEntry, FarmMetrics,
+    FarmStats, Job, JobId, JobState, JobSubmit, LogLevel, LogSource, OpenJdAmountRequirement,
+    OpenJdAttributeRequirement, ResourceLimitDefinition, ResourceLimitSnapshot, Task, TaskArtifact,
+    TaskAttempt, TaskAttemptState, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
+    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo,
+    WorkerLogBatch, WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -68,10 +69,22 @@ struct SchedulerState {
     jobs: HashMap<JobId, Job>,
     workers: HashMap<WorkerId, WorkerInfo>,
     logs: Vec<FarmLogEntry>,
+    #[serde(default)]
+    audit_events: Vec<AuditEvent>,
+    #[serde(default)]
+    observability: ObservabilityCounters,
+    #[serde(default)]
     limits: HashMap<String, ResourceLimitDefinition>,
 }
 
 const MAX_LOG_ENTRIES: usize = 500;
+const MAX_AUDIT_EVENTS: usize = 500;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ObservabilityCounters {
+    lease_renewals: u64,
+    scheduler_errors: u64,
+}
 
 impl InMemoryScheduler {
     pub fn with_config(config: SchedulerConfig) -> Self {
@@ -163,6 +176,14 @@ impl InMemoryScheduler {
                 stream: None,
             },
         );
+        audit_success(
+            &mut state,
+            "api",
+            "job.submit",
+            "job",
+            Some(job.id.to_string()),
+            Some(job.name.clone()),
+        );
         Ok(job)
     }
 
@@ -209,6 +230,21 @@ impl InMemoryScheduler {
         Ok(state.logs.clone())
     }
 
+    pub fn metrics_snapshot(&self) -> Result<FarmMetrics, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        Ok(metrics_snapshot(&state))
+    }
+
+    pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        Ok(state.audit_events.clone())
+    }
+
+    pub fn record_audit_event(&self, input: AuditEventInput) -> Result<AuditEvent, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        Ok(push_audit(&mut state, input))
+    }
+
     pub fn list_worker_logs(&self, worker_id: WorkerId) -> Result<Vec<FarmLogEntry>, FarmError> {
         let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
         if !state.workers.contains_key(&worker_id) {
@@ -247,6 +283,14 @@ impl InMemoryScheduler {
                 worker_id: Some(worker.id),
                 stream: None,
             },
+        );
+        audit_success(
+            &mut state,
+            "worker",
+            "worker.register",
+            "worker",
+            Some(worker.id.to_string()),
+            Some(worker.name.clone()),
         );
         Ok(worker)
     }
@@ -331,6 +375,14 @@ impl InMemoryScheduler {
         state
             .limits
             .insert(definition.name.clone(), definition.clone());
+        audit_success(
+            &mut state,
+            "api",
+            "limit.define",
+            "limit",
+            Some(definition.name.clone()),
+            Some(format!("max_count={}", definition.max_count)),
+        );
         Ok(limit_snapshot(&state, &definition))
     }
 
@@ -347,7 +399,16 @@ impl InMemoryScheduler {
             .ok_or(FarmError::WorkerNotFound(worker_id))?;
         worker.state = WorkerState::Online;
         worker.last_seen_at = Utc::now();
-        Ok(worker.clone())
+        let worker = worker.clone();
+        audit_success(
+            &mut state,
+            format!("worker:{}", worker.id),
+            "worker.heartbeat",
+            "worker",
+            Some(worker.id.to_string()),
+            None,
+        );
+        Ok(worker)
     }
 
     pub fn pause_job(&self, job_id: JobId) -> Result<Job, FarmError> {
@@ -369,7 +430,16 @@ impl InMemoryScheduler {
                 )));
             }
         }
-        Ok(job.clone())
+        let job = job.clone();
+        audit_success(
+            &mut state,
+            "api",
+            "job.pause",
+            "job",
+            Some(job.id.to_string()),
+            None,
+        );
+        Ok(job)
     }
 
     pub fn resume_job(&self, job_id: JobId) -> Result<Job, FarmError> {
@@ -388,7 +458,16 @@ impl InMemoryScheduler {
                 )));
             }
         }
-        Ok(job.clone())
+        let job = job.clone();
+        audit_success(
+            &mut state,
+            "api",
+            "job.resume",
+            "job",
+            Some(job.id.to_string()),
+            None,
+        );
+        Ok(job)
     }
 
     pub fn cancel_job(&self, job_id: JobId) -> Result<Job, FarmError> {
@@ -434,7 +513,16 @@ impl InMemoryScheduler {
                 }
             }
         }
-        Ok(job.clone())
+        let job = job.clone();
+        audit_success(
+            &mut state,
+            "api",
+            "job.cancel",
+            "job",
+            Some(job.id.to_string()),
+            None,
+        );
+        Ok(job)
     }
 
     pub fn update_job_priority(&self, job_id: JobId, priority: i32) -> Result<Job, FarmError> {
@@ -445,7 +533,16 @@ impl InMemoryScheduler {
             .ok_or(FarmError::JobNotFound(job_id))?;
         job.priority = priority;
         job.updated_at = Utc::now();
-        Ok(job.clone())
+        let job = job.clone();
+        audit_success(
+            &mut state,
+            "api",
+            "job.priority",
+            "job",
+            Some(job.id.to_string()),
+            Some(format!("priority={priority}")),
+        );
+        Ok(job)
     }
 
     pub fn lease_task(&self, worker_id: WorkerId) -> Result<Option<TaskLease>, FarmError> {
@@ -547,6 +644,14 @@ impl InMemoryScheduler {
                 stream: None,
             },
         );
+        audit_success(
+            &mut state,
+            format!("worker:{worker_id}"),
+            "task.lease",
+            "task",
+            Some(task_id.to_string()),
+            Some(task_name),
+        );
 
         Ok(Some(TaskLease {
             task: leased_task,
@@ -597,6 +702,14 @@ impl InMemoryScheduler {
         }
         let task = task.clone();
         update_job_state(job);
+        audit_success(
+            &mut state,
+            "api",
+            "task.cancel",
+            "task",
+            Some(task.id.to_string()),
+            Some(task.name.clone()),
+        );
         Ok(task)
     }
 
@@ -630,6 +743,14 @@ impl InMemoryScheduler {
         }
         let task = task.clone();
         update_job_state(job);
+        audit_success(
+            &mut state,
+            "api",
+            "task.requeue",
+            "task",
+            Some(task.id.to_string()),
+            Some(task.name.clone()),
+        );
         Ok(task)
     }
 
@@ -670,6 +791,14 @@ impl InMemoryScheduler {
                 stream: None,
             },
         );
+        audit_success(
+            &mut state,
+            format!("worker:{}", started.worker_id),
+            "task.start",
+            "task",
+            Some(task.id.to_string()),
+            Some(task.name.clone()),
+        );
         Ok(task)
     }
 
@@ -680,22 +809,34 @@ impl InMemoryScheduler {
     ) -> Result<Task, FarmError> {
         let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
         let (job_id, task_index) = find_task_location(&state, task_id)?;
-        let job = state
-            .jobs
-            .get_mut(&job_id)
-            .ok_or(FarmError::JobNotFound(job_id))?;
-        let task = job
-            .tasks
-            .get_mut(task_index)
-            .ok_or(FarmError::TaskNotFound(task_id))?;
-        validate_lease(task, renewal.worker_id, &renewal.lease_token)?;
+        let task = {
+            let job = state
+                .jobs
+                .get_mut(&job_id)
+                .ok_or(FarmError::JobNotFound(job_id))?;
+            let task = job
+                .tasks
+                .get_mut(task_index)
+                .ok_or(FarmError::TaskNotFound(task_id))?;
+            validate_lease(task, renewal.worker_id, &renewal.lease_token)?;
 
-        let now = Utc::now();
-        if let Some(lease) = &mut task.lease {
-            lease.expires_at = now + self.lease_ttl();
-        }
-        task.updated_at = now;
-        Ok(task.clone())
+            let now = Utc::now();
+            if let Some(lease) = &mut task.lease {
+                lease.expires_at = now + self.lease_ttl();
+            }
+            task.updated_at = now;
+            task.clone()
+        };
+        state.observability.lease_renewals += 1;
+        audit_success(
+            &mut state,
+            format!("worker:{}", renewal.worker_id),
+            "task.lease_renew",
+            "task",
+            Some(task.id.to_string()),
+            Some(task.name.clone()),
+        );
+        Ok(task)
     }
 
     pub fn complete_task(
@@ -736,7 +877,16 @@ impl InMemoryScheduler {
                 },
             );
             task.lease = None;
-            return Ok(task.clone());
+            let task = task.clone();
+            audit_success(
+                &mut state,
+                format!("worker:{}", completion.worker_id),
+                "task.complete_cancelled",
+                "task",
+                Some(task.id.to_string()),
+                Some(format!("exit_code={}", completion.exit_code)),
+            );
+            return Ok(task);
         }
 
         task.completed_at = Some(completed_at);
@@ -801,6 +951,14 @@ impl InMemoryScheduler {
                 worker_id: Some(completion.worker_id),
                 stream: None,
             },
+        );
+        audit_success(
+            &mut state,
+            format!("worker:{}", completion.worker_id),
+            "task.complete",
+            "task",
+            Some(task.id.to_string()),
+            Some(format!("exit_code={}", completion.exit_code)),
         );
         Ok(task)
     }
@@ -880,6 +1038,18 @@ impl SqliteScheduler {
 
     pub fn list_logs(&self) -> Result<Vec<FarmLogEntry>, FarmError> {
         self.inner.list_logs()
+    }
+
+    pub fn metrics_snapshot(&self) -> Result<FarmMetrics, FarmError> {
+        self.inner.metrics_snapshot()
+    }
+
+    pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, FarmError> {
+        self.inner.list_audit_events()
+    }
+
+    pub fn record_audit_event(&self, input: AuditEventInput) -> Result<AuditEvent, FarmError> {
+        self.write_durably(|inner| inner.record_audit_event(input))
     }
 
     pub fn list_worker_logs(&self, worker_id: WorkerId) -> Result<Vec<FarmLogEntry>, FarmError> {
@@ -1446,6 +1616,49 @@ fn push_log(state: &mut SchedulerState, log: NewLog) -> FarmLogEntry {
     entry
 }
 
+fn push_audit(state: &mut SchedulerState, input: AuditEventInput) -> AuditEvent {
+    if input.outcome == AuditOutcome::Failure {
+        state.observability.scheduler_errors += 1;
+    }
+    let event = AuditEvent {
+        id: Uuid::new_v4(),
+        timestamp: Utc::now(),
+        actor: input.actor,
+        action: input.action,
+        target_type: input.target_type,
+        target_id: input.target_id,
+        outcome: input.outcome,
+        message: input.message,
+    };
+    state.audit_events.push(event.clone());
+    if state.audit_events.len() > MAX_AUDIT_EVENTS {
+        let overflow = state.audit_events.len() - MAX_AUDIT_EVENTS;
+        state.audit_events.drain(0..overflow);
+    }
+    event
+}
+
+fn audit_success(
+    state: &mut SchedulerState,
+    actor: impl Into<String>,
+    action: impl Into<String>,
+    target_type: impl Into<String>,
+    target_id: Option<String>,
+    message: Option<String>,
+) {
+    push_audit(
+        state,
+        AuditEventInput {
+            actor: actor.into(),
+            action: action.into(),
+            target_type: target_type.into(),
+            target_id,
+            outcome: AuditOutcome::Success,
+            message,
+        },
+    );
+}
+
 fn find_task_location(
     state: &SchedulerState,
     task_id: TaskId,
@@ -1549,13 +1762,27 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
     stats
 }
 
+fn metrics_snapshot(state: &SchedulerState) -> FarmMetrics {
+    let stats = compute_stats(state);
+    FarmMetrics {
+        queue_depth: stats.tasks_pending,
+        running_tasks: stats.tasks_running + stats.tasks_leased,
+        failed_tasks: stats.tasks_failed,
+        lease_renewals: state.observability.lease_renewals,
+        scheduler_errors: state.observability.scheduler_errors,
+        workers_online: stats.workers_online,
+        workers_offline: stats.workers_offline,
+        stats,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::models::{
-        ArtifactKind, CommandSpec, LogLevel, OpenJdAmountRequirement, OpenJdAttributeRequirement,
-        ResourceLimitDefinition, TaskArtifact, TaskAttemptState, TaskLease, TaskLeaseRenewal,
-        TaskRequirements, TaskStarted, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch,
-        WorkerLogInput,
+        ArtifactKind, AuditEventInput, AuditOutcome, CommandSpec, LogLevel,
+        OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition, TaskArtifact,
+        TaskAttemptState, TaskLease, TaskLeaseRenewal, TaskRequirements, TaskStarted,
+        WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch, WorkerLogInput,
     };
 
     use super::*;
@@ -1667,6 +1894,60 @@ mod tests {
         assert_eq!(snapshot.stats.worker_slots_available, 4);
         assert_eq!(snapshot.jobs[0].name, "stats-demo");
         assert_eq!(snapshot.workers[0].name, "render-node-01");
+    }
+
+    #[test]
+    fn metrics_snapshot_reports_operational_counters() {
+        let scheduler = InMemoryScheduler::default();
+        let worker = register_worker(&scheduler);
+        let lease = lease_single_task(&scheduler, worker.id);
+        scheduler
+            .renew_task_lease(
+                lease.task.id,
+                TaskLeaseRenewal {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token.clone(),
+                },
+            )
+            .expect("lease should renew");
+        scheduler
+            .complete_task(
+                lease.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: lease.lease_token,
+                    exit_code: 1,
+                    stdout_tail: None,
+                    stderr_tail: Some("failed".to_string()),
+                    artifacts: Vec::new(),
+                },
+            )
+            .expect("task should fail");
+        scheduler
+            .record_audit_event(AuditEventInput {
+                actor: "test".to_string(),
+                action: "scheduler.error".to_string(),
+                target_type: "scheduler".to_string(),
+                target_id: None,
+                outcome: AuditOutcome::Failure,
+                message: Some("synthetic failure".to_string()),
+            })
+            .expect("audit should record");
+
+        let metrics = scheduler.metrics_snapshot().expect("metrics should load");
+        assert_eq!(metrics.queue_depth, 0);
+        assert_eq!(metrics.running_tasks, 0);
+        assert_eq!(metrics.failed_tasks, 1);
+        assert_eq!(metrics.lease_renewals, 1);
+        assert_eq!(metrics.scheduler_errors, 1);
+        assert_eq!(metrics.workers_online, 1);
+        assert_eq!(metrics.workers_offline, 0);
+
+        let audit = scheduler.list_audit_events().expect("audit should load");
+        assert!(audit.iter().any(|event| event.action == "task.lease_renew"));
+        assert!(audit
+            .iter()
+            .any(|event| event.outcome == AuditOutcome::Failure));
     }
 
     #[test]

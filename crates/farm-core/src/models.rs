@@ -462,6 +462,44 @@ pub struct FarmStats {
     pub worker_slots_available: u32,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FarmMetrics {
+    pub queue_depth: usize,
+    pub running_tasks: usize,
+    pub failed_tasks: usize,
+    pub lease_renewals: u64,
+    pub scheduler_errors: u64,
+    pub workers_online: usize,
+    pub workers_offline: usize,
+    pub stats: FarmStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthReport {
+    pub status: HealthStatus,
+    pub controller: HealthComponent,
+    pub scheduler: HealthComponent,
+    #[serde(default)]
+    pub degraded: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    #[serde(rename = "ok")]
+    Ready,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthComponent {
+    pub status: HealthStatus,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
@@ -638,6 +676,39 @@ pub struct FarmLogEntry {
     pub attempt_id: Option<Uuid>,
     #[serde(default)]
     pub worker_id: Option<WorkerId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub actor: String,
+    pub action: String,
+    pub target_type: String,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    pub outcome: AuditOutcome,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEventInput {
+    pub actor: String,
+    pub action: String,
+    pub target_type: String,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    pub outcome: AuditOutcome,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditOutcome {
+    Success,
+    Failure,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

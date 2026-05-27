@@ -9,10 +9,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, ValueEnum};
 use farm_core::{
-    DashboardSnapshot, FarmError, FarmLogEntry, FarmStats, InMemoryScheduler, Job, JobId,
-    JobPriorityUpdate, JobSubmit, ResourceLimitDefinition, ResourceLimitSnapshot, SchedulerConfig,
-    SqliteScheduler, Task, TaskComplete, TaskId, TaskLease, TaskLeaseRenewal, TaskStarted,
-    WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister,
+    AuditEvent, DashboardSnapshot, FarmError, FarmLogEntry, FarmMetrics, FarmStats,
+    HealthComponent, HealthReport, HealthStatus, InMemoryScheduler, Job, JobId, JobPriorityUpdate,
+    JobSubmit, ResourceLimitDefinition, ResourceLimitSnapshot, SchedulerConfig, SqliteScheduler,
+    Task, TaskComplete, TaskId, TaskLease, TaskLeaseRenewal, TaskStarted, WorkerId, WorkerInfo,
+    WorkerLogBatch, WorkerRegister,
 };
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -82,6 +83,60 @@ impl AppScheduler {
         match self {
             Self::Memory(scheduler) => scheduler.list_logs(),
             Self::Sqlite(scheduler) => scheduler.list_logs(),
+        }
+    }
+
+    fn metrics_snapshot(&self) -> Result<FarmMetrics, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.metrics_snapshot(),
+            Self::Sqlite(scheduler) => scheduler.metrics_snapshot(),
+        }
+    }
+
+    fn list_audit_events(&self) -> Result<Vec<AuditEvent>, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.list_audit_events(),
+            Self::Sqlite(scheduler) => scheduler.list_audit_events(),
+        }
+    }
+
+    fn backend_name(&self) -> &'static str {
+        match self {
+            Self::Memory(_) => "memory",
+            Self::Sqlite(_) => "sqlite",
+        }
+    }
+
+    fn health_report(&self) -> HealthReport {
+        match self.metrics_snapshot() {
+            Ok(_) => HealthReport {
+                status: HealthStatus::Ready,
+                controller: HealthComponent {
+                    status: HealthStatus::Ready,
+                    backend: None,
+                    message: Some("controller ready".to_string()),
+                },
+                scheduler: HealthComponent {
+                    status: HealthStatus::Ready,
+                    backend: Some(self.backend_name().to_string()),
+                    message: Some("scheduler ready".to_string()),
+                },
+                degraded: Vec::new(),
+            },
+            Err(error) => HealthReport {
+                status: HealthStatus::Degraded,
+                controller: HealthComponent {
+                    status: HealthStatus::Ready,
+                    backend: None,
+                    message: Some("controller ready".to_string()),
+                },
+                scheduler: HealthComponent {
+                    status: HealthStatus::Degraded,
+                    backend: Some(self.backend_name().to_string()),
+                    message: Some(error.to_string()),
+                },
+                degraded: vec!["scheduler".to_string()],
+            },
         }
     }
 
@@ -260,8 +315,12 @@ async fn main() -> anyhow::Result<()> {
 fn app(scheduler: AppScheduler) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(healthz))
+        .route("/v1/health", get(healthz))
         .route("/v1/dashboard", get(get_dashboard))
         .route("/v1/logs", get(list_logs))
+        .route("/v1/audit", get(list_audit_events))
+        .route("/v1/metrics", get(get_metrics))
         .route("/v1/stats", get(get_stats))
         .route("/v1/limits", get(list_limits).post(define_limit))
         .route("/v1/jobs", get(list_jobs).post(submit_job))
@@ -296,8 +355,8 @@ fn app(scheduler: AppScheduler) -> Router {
         .with_state(scheduler)
 }
 
-async fn healthz() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
+async fn healthz(State(scheduler): State<AppScheduler>) -> Json<HealthReport> {
+    Json(scheduler.health_report())
 }
 
 async fn submit_job(
@@ -359,6 +418,10 @@ async fn get_stats(State(scheduler): State<AppScheduler>) -> Result<Json<FarmSta
     Ok(Json(scheduler.dashboard_snapshot()?.stats))
 }
 
+async fn get_metrics(State(scheduler): State<AppScheduler>) -> Result<Json<FarmMetrics>, ApiError> {
+    Ok(Json(scheduler.metrics_snapshot()?))
+}
+
 async fn get_dashboard(
     State(scheduler): State<AppScheduler>,
 ) -> Result<Json<DashboardSnapshot>, ApiError> {
@@ -369,6 +432,12 @@ async fn list_logs(
     State(scheduler): State<AppScheduler>,
 ) -> Result<Json<Vec<FarmLogEntry>>, ApiError> {
     Ok(Json(scheduler.list_logs()?))
+}
+
+async fn list_audit_events(
+    State(scheduler): State<AppScheduler>,
+) -> Result<Json<Vec<AuditEvent>>, ApiError> {
+    Ok(Json(scheduler.list_audit_events()?))
 }
 
 async fn define_limit(
@@ -545,5 +614,22 @@ fn content_type_for(name: &str) -> &'static str {
         "json" => "application/json",
         "ma" | "mb" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_report_includes_controller_and_scheduler_status() {
+        let scheduler = AppScheduler::Memory(InMemoryScheduler::default());
+        let report = scheduler.health_report();
+
+        assert_eq!(report.status, HealthStatus::Ready);
+        assert_eq!(report.controller.status, HealthStatus::Ready);
+        assert_eq!(report.scheduler.status, HealthStatus::Ready);
+        assert_eq!(report.scheduler.backend.as_deref(), Some("memory"));
+        assert!(report.degraded.is_empty());
     }
 }
