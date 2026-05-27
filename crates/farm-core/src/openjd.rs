@@ -339,6 +339,7 @@ fn json_error(error: serde_json::Error) -> FarmError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
     use serde_json::json;
 
@@ -419,6 +420,62 @@ steps:
     }
 
     #[test]
+    fn summarizes_repository_python_example() {
+        let mut bundle = example_bundle("examples/openjd_python_frames.yaml");
+        bundle
+            .parameters
+            .insert("Message".to_string(), json!("from-test"));
+
+        let summary = summarize_openjd(&bundle).expect("example should summarize");
+        assert_eq!(summary.name.as_deref(), Some("PythonFrameSmoke"));
+        assert_eq!(summary.step_count, 1);
+        assert_eq!(summary.task_count, 5);
+    }
+
+    #[test]
+    fn converts_repository_dcc_examples() {
+        let root = repo_root();
+
+        let mut blender = example_bundle("examples/dcc/blender_render_openjd.yaml");
+        blender
+            .parameters
+            .insert("BlenderExecutable".to_string(), json!("blender"));
+        blender.parameters.insert(
+            "ScriptPath".to_string(),
+            json!(path_string(
+                root.join("examples/dcc/blender_render_task.py")
+            )),
+        );
+        blender.parameters.insert(
+            "OutputDir".to_string(),
+            json!(path_string(root.join("target/openjd-test/blender"))),
+        );
+
+        let blender_tasks = openjd_to_tasks(&blender).expect("Blender example should parse");
+        assert_eq!(blender_tasks.len(), 3);
+        assert!(blender_tasks.iter().all(|task| task
+            .openjd
+            .as_ref()
+            .is_some_and(|openjd| openjd.step_name == "RenderFrame")));
+
+        let mut maya = example_bundle("examples/dcc/maya_render_openjd.yaml");
+        maya.parameters
+            .insert("MayaPython".to_string(), json!("mayapy"));
+        maya.parameters.insert(
+            "ScriptPath".to_string(),
+            json!(path_string(root.join("examples/dcc/maya_render_task.py"))),
+        );
+        maya.parameters.insert(
+            "OutputDir".to_string(),
+            json!(path_string(root.join("target/openjd-test/maya"))),
+        );
+
+        let maya_summary = summarize_openjd(&maya).expect("Maya example should summarize");
+        assert_eq!(maya_summary.name.as_deref(), Some("MayaRender"));
+        assert_eq!(maya_summary.task_count, 3);
+    }
+
+    #[test]
     fn rejects_invalid_openjd_template_with_official_validation() {
         let bundle = OpenJdSubmit {
             template_yaml: "name: MissingVersion".to_string(),
@@ -432,5 +489,29 @@ steps:
 
         let err = openjd_to_tasks(&bundle).expect_err("template should be rejected");
         assert!(err.to_string().contains("specificationVersion"));
+    }
+
+    fn example_bundle(relative_path: &str) -> OpenJdSubmit {
+        let path = repo_root().join(relative_path);
+        OpenJdSubmit {
+            template_yaml: std::fs::read_to_string(&path).expect("example should be readable"),
+            parameters: HashMap::new(),
+            asset_root: None,
+            supported_extensions: Vec::new(),
+            path_mapping_rules: Vec::new(),
+            template_dir: path.parent().map(Path::to_path_buf),
+            current_working_dir: Some(repo_root()),
+        }
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repo root should resolve")
+    }
+
+    fn path_string(path: PathBuf) -> String {
+        path.to_string_lossy().to_string()
     }
 }

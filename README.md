@@ -1,6 +1,7 @@
 # Renderacre
 
 [![CI](https://github.com/loonghao/renderacre/actions/workflows/ci.yml/badge.svg)](https://github.com/loonghao/renderacre/actions/workflows/ci.yml)
+[![DCC E2E](https://github.com/loonghao/renderacre/actions/workflows/dcc-e2e.yml/badge.svg)](https://github.com/loonghao/renderacre/actions/workflows/dcc-e2e.yml)
 [![Release](https://github.com/loonghao/renderacre/actions/workflows/release.yml/badge.svg)](https://github.com/loonghao/renderacre/actions/workflows/release.yml)
 [![PyPI](https://img.shields.io/pypi/v/renderacre.svg)](https://pypi.org/project/renderacre/)
 [![Python](https://img.shields.io/pypi/pyversions/renderacre.svg)](https://pypi.org/project/renderacre/)
@@ -27,6 +28,7 @@ The Python package is named `renderacre` and is built as a `cp37-abi3` wheel, so
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\e2e_smoke.ps1
+python .\scripts\e2e_dcc_tasks.py --jobs python
 python -m maturin build --release -o target\wheels
 ```
 
@@ -143,6 +145,23 @@ Serve `dashboard/dist` through your internal web server or reverse proxy next to
 
 ## DCC Examples
 
+Renderacre ships real OpenJD examples for Python frame tasks, Blender background
+renders, and Maya standalone scene exports. The same templates are exercised by
+the `DCC E2E` GitHub Actions workflow: Blender uses official Linux tarballs, and
+Maya uses the `tahv/mayapy` container images.
+
+Run the full DCC e2e suite on a machine that has Blender and Maya on `PATH`:
+
+```powershell
+python .\scripts\e2e_dcc_tasks.py --jobs all --blender-exe blender --maya-python mayapy
+```
+
+Run only the jobs available on the current machine:
+
+```powershell
+python .\scripts\e2e_dcc_tasks.py --jobs auto
+```
+
 Blender:
 
 ```powershell
@@ -166,6 +185,9 @@ $params = @{
 ```
 
 Pass the template and parameter JSON through `renderacre.openjd_job(...)` or submit the equivalent REST payload to `/v1/jobs`.
+
+For CI parity, the script writes Blender PNGs and Maya `.ma` scenes under
+`target/e2e-dcc/` and fails if any expected frame output is missing.
 
 ## Deployment
 

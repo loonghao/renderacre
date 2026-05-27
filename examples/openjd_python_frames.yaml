@@ -1,6 +1,9 @@
 specificationVersion: jobtemplate-2023-09
 name: PythonFrameSmoke
 parameterDefinitions:
+  - name: PythonExecutable
+    type: STRING
+    default: python
   - name: Message
     type: STRING
     default: renderacre
@@ -14,7 +17,7 @@ steps:
     script:
       actions:
         onRun:
-          command: python
+          command: "{{ Param.PythonExecutable }}"
           args:
             - -c
             - "print('{{ Param.Message }} frame {{ Task.Param.Frame }}')"

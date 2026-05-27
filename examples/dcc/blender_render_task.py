@@ -10,6 +10,7 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args()
 
+    bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
     bpy.ops.mesh.primitive_cube_add(size=2)
     cube = bpy.context.object
@@ -24,6 +25,13 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     bpy.context.scene.frame_set(args.frame)
+    bpy.context.scene.render.resolution_x = 64
+    bpy.context.scene.render.resolution_y = 64
+    bpy.context.scene.render.resolution_percentage = 100
+    try:
+        bpy.context.scene.render.engine = "BLENDER_EEVEE"
+    except TypeError:
+        pass
     bpy.context.scene.render.filepath = str(output_dir / f"blender_frame_{args.frame:04d}.png")
     bpy.ops.render.render(write_still=True)
 

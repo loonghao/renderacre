@@ -1,0 +1,104 @@
+name: DCC E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-openjd:
+    name: Python OpenJD
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Python OpenJD e2e
+        run: python scripts/e2e_dcc_tasks.py --jobs python
+
+  blender-openjd:
+    name: Blender OpenJD ${{ matrix.blender-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - blender-version: "2.83.20"
+            blender-url: "https://download.blender.org/release/Blender2.83/blender-2.83.20-linux-x64.tar.xz"
+            blender-dir: "blender-2.83.20-linux-x64"
+          - blender-version: "3.6.21"
+            blender-url: "https://download.blender.org/release/Blender3.6/blender-3.6.21-linux-x64.tar.xz"
+            blender-dir: "blender-3.6.21-linux-x64"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Blender from tarball
+        run: |
+          wget -q "${{ matrix.blender-url }}" -O /tmp/blender.tar.xz
+          tar -xf /tmp/blender.tar.xz -C /opt
+          sudo ln -sf /opt/${{ matrix.blender-dir }}/blender /usr/local/bin/blender
+
+      - name: Verify Blender
+        run: blender --version
+
+      - name: Run Blender OpenJD e2e
+        run: python scripts/e2e_dcc_tasks.py --jobs blender --blender-exe blender
+
+  maya-openjd:
+    name: Maya OpenJD ${{ matrix.maya-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - maya-version: "2022"
+          - maya-version: "2024"
+    container:
+      image: tahv/mayapy:${{ matrix.maya-version }}
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential ca-certificates curl git pkg-config zstd
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify mayapy
+        run: |
+          mayapy -c "
+          import maya.standalone
+          maya.standalone.initialize(name='python')
+          import sys
+          from maya import cmds
+          print('Maya', cmds.about(version=True), 'Python', sys.version.split()[0])
+          maya.standalone.uninitialize()
+          "
+
+      - name: Run Maya OpenJD e2e
+        run: mayapy scripts/e2e_dcc_tasks.py --jobs maya --maya-python mayapy
