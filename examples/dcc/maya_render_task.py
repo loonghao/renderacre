@@ -21,7 +21,6 @@ def main() -> None:
         camera = cmds.camera(name="RenderacreCamera")[0]
         cmds.setAttr(f"{camera}.translate", 4, 5, 6, type="double3")
         cmds.setAttr(f"{camera}.rotate", -35, 35, 0, type="double3")
-        cmds.lookThru(camera)
 
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

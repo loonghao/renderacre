@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 
 import bpy
@@ -8,7 +9,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frame", type=int, required=True)
     parser.add_argument("--output-dir", required=True)
-    args = parser.parse_args()
+    blender_args = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
+    args = parser.parse_args(blender_args)
 
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
