@@ -20,6 +20,9 @@ Core endpoints:
 
 - `POST /v1/jobs`: submit a direct task job or an OpenJD-backed job.
 - `GET /v1/jobs/{job_id}`: inspect state and task output tails.
+- `GET /healthz`, `GET /readyz`, `GET /v1/health`: inspect controller and scheduler readiness.
+- `GET /v1/metrics`: read queue, worker, lease-renewal, and scheduler-error metrics.
+- `GET /v1/audit`: read recent state-changing control-plane events.
 - `POST /v1/workers/register`: register a worker.
 - `POST /v1/workers/{worker_id}/heartbeat`: keep worker online.
 - `POST /v1/workers/{worker_id}/lease`: get the next runnable task.
@@ -63,6 +66,19 @@ can request limits by name; undefined or exhausted limits block otherwise
 runnable tasks until usage is released by completion, cancellation, requeue, or
 lease expiry. Limit snapshots are exposed in the dashboard payload and the
 dedicated `/v1/limits` API.
+
+## Observability
+
+Health endpoints return a machine-readable `HealthReport` with controller
+readiness, scheduler backend name, scheduler readiness, and degraded component
+names. Small farms can poll `/healthz`; deployment systems that separate
+startup and readiness can use `/readyz` with the same payload.
+
+`/v1/metrics` returns a `FarmMetrics` payload with queue depth, running tasks,
+failed tasks, worker online/offline counts, lease renewal count, scheduler error
+count, and the full queue `FarmStats` snapshot. `/v1/audit` returns recent
+state-changing events with actor, action, target type/id, timestamp, outcome,
+and message so operators can review queue mutations and worker transitions.
 
 ## OpenJD path
 
