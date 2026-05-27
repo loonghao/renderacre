@@ -216,6 +216,7 @@ fn expand_openjd_tasks(
                     .as_ref()
                     .map(openjd_host_requirements)
                     .unwrap_or_default(),
+                limits: Vec::new(),
                 max_retries: None,
                 artifact_paths: infer_artifact_paths(&job_parameters),
                 openjd: Some(openjd),

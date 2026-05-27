@@ -94,6 +94,13 @@ export interface FarmLog {
   worker_id?: string | null;
 }
 
+export interface ApiLimit {
+  name: string;
+  max_count: number;
+  used: number;
+  available: number;
+}
+
 export interface ApiStats {
   jobs_total: number;
   jobs_queued: number;
@@ -118,6 +125,7 @@ export interface DashboardSnapshot {
   jobs: ApiJob[];
   workers: ApiWorker[];
   logs: FarmLog[];
+  limits: ApiLimit[];
 }
 
 export interface WorkflowNode {

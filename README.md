@@ -151,6 +151,22 @@ Workers advertise matching capabilities with labels such as
 also register default OpenJD capabilities for OS family, CPU architecture, and
 slot count, so OpenJD `hostRequirements` work out of the box for common cases.
 
+Operators can define shared limits for scarce licenses or farm-wide resources,
+then tasks can declare the named limits they need:
+
+```text
+POST /v1/limits
+GET /v1/limits
+```
+
+```json
+{
+  "name": "maya-render",
+  "command": { "executable": "mayapy", "args": ["render.py"] },
+  "limits": ["maya"]
+}
+```
+
 Common queue operations are available as stable action endpoints:
 
 ```text

@@ -145,7 +145,7 @@ export function App() {
         ) : null}
         {activeView === "logs" ? <LogsView logs={snapshot.logs} workers={snapshot.workers} /> : null}
         {activeView === "openjd" ? <OpenJdView jobs={snapshot.jobs} /> : null}
-        {activeView === "settings" ? <SettingsView source={source} stats={snapshot.stats} /> : null}
+        {activeView === "settings" ? <SettingsView limits={snapshot.limits} source={source} stats={snapshot.stats} /> : null}
       </main>
     </div>
   );

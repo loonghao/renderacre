@@ -10,9 +10,10 @@ use uuid::Uuid;
 
 use crate::models::{
     DashboardSnapshot, FarmLogEntry, FarmStats, Job, JobId, JobState, JobSubmit, LogLevel,
-    LogSource, OpenJdAmountRequirement, OpenJdAttributeRequirement, Task, TaskArtifact,
-    TaskComplete, TaskId, TaskLease, TaskLeaseInfo, TaskLeaseRenewal, TaskStarted, TaskState,
-    TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister, WorkerState,
+    LogSource, OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition,
+    ResourceLimitSnapshot, Task, TaskArtifact, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
+    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerCapacity, WorkerId, WorkerInfo,
+    WorkerLogBatch, WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -65,6 +66,7 @@ struct SchedulerState {
     jobs: HashMap<JobId, Job>,
     workers: HashMap<WorkerId, WorkerInfo>,
     logs: Vec<FarmLogEntry>,
+    limits: HashMap<String, ResourceLimitDefinition>,
 }
 
 const MAX_LOG_ENTRIES: usize = 500;
@@ -195,6 +197,7 @@ impl InMemoryScheduler {
             jobs,
             workers,
             logs: state.logs.clone(),
+            limits: limit_snapshots(&state),
         })
     }
 
@@ -270,6 +273,29 @@ impl InMemoryScheduler {
             recorded.push(entry);
         }
         Ok(recorded)
+    }
+
+    pub fn define_limit(
+        &self,
+        definition: ResourceLimitDefinition,
+    ) -> Result<ResourceLimitSnapshot, FarmError> {
+        if definition.name.trim().is_empty() || definition.max_count == 0 {
+            return Err(FarmError::InvalidSubmission(
+                "resource limits require a non-empty name and max_count greater than zero"
+                    .to_string(),
+            ));
+        }
+
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        state
+            .limits
+            .insert(definition.name.clone(), definition.clone());
+        Ok(limit_snapshot(&state, &definition))
+    }
+
+    pub fn list_limits(&self) -> Result<Vec<ResourceLimitSnapshot>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        Ok(limit_snapshots(&state))
     }
 
     pub fn heartbeat_worker(&self, worker_id: WorkerId) -> Result<WorkerInfo, FarmError> {
@@ -405,6 +431,7 @@ impl InMemoryScheduler {
             .filter(|(job_id, task_id, _, _)| {
                 task_matches_worker(&state, *job_id, *task_id, &worker)
             })
+            .filter(|(job_id, task_id, _, _)| limits_are_available(&state, *job_id, *task_id))
             .max_by_key(|(_, _, priority, created_at)| (*priority, std::cmp::Reverse(*created_at)));
 
         let Some((job_id, task_id, _, _)) = selected else {
@@ -741,6 +768,17 @@ impl SqliteScheduler {
         self.write_durably(|inner| inner.record_worker_logs(worker_id, batch))
     }
 
+    pub fn define_limit(
+        &self,
+        definition: ResourceLimitDefinition,
+    ) -> Result<ResourceLimitSnapshot, FarmError> {
+        self.write_durably(|inner| inner.define_limit(definition))
+    }
+
+    pub fn list_limits(&self) -> Result<Vec<ResourceLimitSnapshot>, FarmError> {
+        self.inner.list_limits()
+    }
+
     pub fn pause_job(&self, job_id: JobId) -> Result<Job, FarmError> {
         self.write_durably(|inner| inner.pause_job(job_id))
     }
@@ -919,6 +957,7 @@ fn task_from_submit(
         openjd: submission.openjd,
         dependencies,
         requirements: submission.requirements,
+        limits: submission.limits,
         attempts: 0,
         max_retries: submission.max_retries.unwrap_or(job_max_retries),
         lease: None,
@@ -1070,6 +1109,55 @@ fn worker_label_value<'a>(worker: &'a WorkerInfo, name: &str) -> Option<&'a str>
                 .find(|(key, _)| key.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.as_str())
         })
+}
+
+fn limits_are_available(state: &SchedulerState, job_id: JobId, task_id: TaskId) -> bool {
+    let Some(job) = state.jobs.get(&job_id) else {
+        return false;
+    };
+    let Some(task) = job.tasks.iter().find(|task| task.id == task_id) else {
+        return false;
+    };
+
+    task.limits.iter().all(|limit_name| {
+        state
+            .limits
+            .get(limit_name)
+            .is_some_and(|definition| active_limit_usage(state, limit_name) < definition.max_count)
+    })
+}
+
+fn active_limit_usage(state: &SchedulerState, limit_name: &str) -> u32 {
+    state
+        .jobs
+        .values()
+        .flat_map(|job| &job.tasks)
+        .filter(|task| matches!(task.state, TaskState::Leased | TaskState::Running))
+        .filter(|task| task.limits.iter().any(|candidate| candidate == limit_name))
+        .count() as u32
+}
+
+fn limit_snapshots(state: &SchedulerState) -> Vec<ResourceLimitSnapshot> {
+    let mut snapshots = state
+        .limits
+        .values()
+        .map(|definition| limit_snapshot(state, definition))
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.name.cmp(&right.name));
+    snapshots
+}
+
+fn limit_snapshot(
+    state: &SchedulerState,
+    definition: &ResourceLimitDefinition,
+) -> ResourceLimitSnapshot {
+    let used = active_limit_usage(state, &definition.name);
+    ResourceLimitSnapshot {
+        name: definition.name.clone(),
+        max_count: definition.max_count,
+        used,
+        available: definition.max_count.saturating_sub(used),
+    }
 }
 
 fn dependencies_are_satisfied(state: &SchedulerState, job_id: JobId, task_id: TaskId) -> bool {
@@ -1236,8 +1324,8 @@ fn compute_stats(state: &SchedulerState) -> FarmStats {
 #[cfg(test)]
 mod tests {
     use crate::models::{
-        CommandSpec, OpenJdAmountRequirement, OpenJdAttributeRequirement, TaskLease,
-        TaskLeaseRenewal, TaskRequirements, WorkerCapacity, WorkerId, WorkerInfo,
+        CommandSpec, OpenJdAmountRequirement, OpenJdAttributeRequirement, ResourceLimitDefinition,
+        TaskLease, TaskLeaseRenewal, TaskRequirements, WorkerCapacity, WorkerId, WorkerInfo,
     };
 
     use super::*;
@@ -1257,6 +1345,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec![],
                         requirements: Default::default(),
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1266,6 +1355,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec!["prepare".to_string()],
                         requirements: Default::default(),
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1320,6 +1410,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1415,6 +1506,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1471,6 +1563,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1527,6 +1620,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec![],
                         requirements: Default::default(),
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1568,6 +1662,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec![],
                         requirements: Default::default(),
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1577,6 +1672,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec![],
                         requirements: Default::default(),
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1643,6 +1739,7 @@ mod tests {
                             pools: vec!["lighting".to_string()],
                             ..Default::default()
                         },
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1656,6 +1753,7 @@ mod tests {
                             pools: vec!["sim".to_string()],
                             ..Default::default()
                         },
+                        limits: Vec::new(),
                         max_retries: None,
                         artifact_paths: Vec::new(),
                         openjd: None,
@@ -1696,6 +1794,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1740,6 +1839,7 @@ mod tests {
                         ..Default::default()
                     },
                     max_retries: None,
+                    limits: Vec::new(),
                     artifact_paths: Vec::new(),
                     openjd: None,
                 }],
@@ -1786,6 +1886,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1823,6 +1924,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1858,6 +1960,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1898,6 +2001,111 @@ mod tests {
             10
         );
     }
+
+    #[test]
+    fn resource_limits_block_until_usage_is_released() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .define_limit(ResourceLimitDefinition {
+                name: "maya".to_string(),
+                max_count: 1,
+            })
+            .expect("limit should be defined");
+        scheduler
+            .submit_job(JobSubmit {
+                name: "limited".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![
+                    limited_task("first", "maya"),
+                    limited_task("second", "maya"),
+                ],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = register_worker(&scheduler);
+
+        let first = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert!(scheduler.lease_task(worker.id).unwrap().is_none());
+        let snapshot = scheduler.list_limits().unwrap();
+        assert_eq!(snapshot[0].used, 1);
+        assert_eq!(snapshot[0].available, 0);
+
+        scheduler
+            .complete_task(
+                first.task.id,
+                TaskComplete {
+                    worker_id: worker.id,
+                    lease_token: first.lease_token,
+                    exit_code: 0,
+                    stdout_tail: None,
+                    stderr_tail: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .expect("completion should release limit");
+
+        let second = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert_ne!(first.task.id, second.task.id);
+    }
+
+    #[test]
+    fn expired_leases_release_limit_usage_for_recovery() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .define_limit(ResourceLimitDefinition {
+                name: "gpu".to_string(),
+                max_count: 1,
+            })
+            .expect("limit should be defined");
+        let job = scheduler
+            .submit_job(JobSubmit {
+                name: "gpu-job".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![limited_task("main", "gpu")],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = register_worker(&scheduler);
+        let lease = scheduler.lease_task(worker.id).unwrap().unwrap();
+
+        {
+            let mut state = scheduler.inner.lock().unwrap();
+            let task = state
+                .jobs
+                .get_mut(&job.id)
+                .unwrap()
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == lease.task.id)
+                .unwrap();
+            task.state = TaskState::Running;
+            task.lease.as_mut().unwrap().expires_at = Utc::now() - Duration::seconds(1);
+        }
+
+        let recovered = scheduler.lease_task(worker.id).unwrap().unwrap();
+        assert_eq!(recovered.task.id, lease.task.id);
+        assert_eq!(scheduler.list_limits().unwrap()[0].used, 1);
+    }
+
+    #[test]
+    fn undefined_limit_blocks_task() {
+        let scheduler = InMemoryScheduler::default();
+        scheduler
+            .submit_job(JobSubmit {
+                name: "missing-limit".to_string(),
+                priority: 0,
+                max_retries: 0,
+                tasks: vec![limited_task("main", "houdini")],
+                openjd: None,
+            })
+            .expect("job should submit");
+        let worker = register_worker(&scheduler);
+
+        assert!(scheduler.lease_task(worker.id).unwrap().is_none());
+    }
+
     fn command(executable: &str) -> CommandSpec {
         CommandSpec {
             executable: executable.to_string(),
@@ -1929,6 +2137,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     requirements: Default::default(),
+                    limits: Vec::new(),
                     max_retries: None,
                     artifact_paths: Vec::new(),
                     openjd: None,
@@ -1940,6 +2149,19 @@ mod tests {
             .lease_task(worker_id)
             .expect("lease should work")
             .expect("a task should be leased")
+    }
+
+    fn limited_task(name: &str, limit: &str) -> TaskSubmit {
+        TaskSubmit {
+            name: name.to_string(),
+            command: command("echo"),
+            dependencies: Vec::new(),
+            requirements: Default::default(),
+            limits: vec![limit.to_string()],
+            max_retries: None,
+            artifact_paths: Vec::new(),
+            openjd: None,
+        }
     }
 
     fn temp_database_path() -> std::path::PathBuf {
