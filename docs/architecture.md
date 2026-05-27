@@ -149,7 +149,7 @@ the path resolution and byte-serving implementation.
 
 ## Dashboard path
 
-`dashboard/` is a Vite React application for queue operations. It reads `/v1/dashboard`, `/v1/jobs`, `/v1/workers`, and `/v1/stats`, then renders a Deadline-style queue table, worker assignment panel, OpenJD step detail, dependency mini graph, attempt history, artifacts, and stdout/stderr tails. During local development Vite proxies `/v1` to the controller; in deployment, serve the built static assets from `dashboard/dist` beside the controller API.
+`dashboard/` is a Vite React application for queue operations. It reads `/v1/dashboard`, `/v1/jobs`, `/v1/workers`, and `/v1/stats`, then renders a Deadline-style queue table, worker assignment panel, OpenJD step detail, dependency mini graph, attempt history, artifacts, and stdout/stderr tails. During local development Vite proxies `/v1` to the controller; in deployment, pass `--dashboard-dir dashboard/dist` or `RFARM_DASHBOARD_DIR` to serve the built static assets from the controller, or serve the same directory from an internal web server or reverse proxy next to the controller API.
 
 ## Release assets
 

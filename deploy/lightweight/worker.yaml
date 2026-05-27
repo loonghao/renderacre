@@ -1,0 +1,9 @@
+# Lightweight worker profile. Copy per render node and adjust name, labels, and slots.
+controller: http://127.0.0.1:7878
+name: render-node-01
+labels:
+  pool: default
+  app: blender
+slots: 1
+poll_seconds: 2
+lease_renew_seconds: 30

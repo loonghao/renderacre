@@ -1,0 +1,7 @@
+# Lightweight single-node controller profile.
+# Paths are resolved relative to the controller working directory.
+bind: 0.0.0.0:7878
+lease_seconds: 120
+storage: sqlite
+sqlite_path: ./var/renderacre/renderacre.sqlite3
+dashboard_dir: ./dashboard/dist

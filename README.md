@@ -262,7 +262,7 @@ cd dashboard
 npm run build
 ```
 
-Serve `dashboard/dist` through your internal web server or reverse proxy next to the controller API.
+Serve `dashboard/dist` through the controller with `--dashboard-dir dashboard/dist`, or through your internal web server or reverse proxy next to the controller API.
 
 ## Command and DCC Examples
 
@@ -339,7 +339,7 @@ artifact download, or worker log line is missing.
 
 Recommended first deployment shape:
 
-- Run one controller per farm or queue: `renderacre-controller --bind 0.0.0.0:7878`.
+- Run one controller per farm or queue: `renderacre-controller --config deploy/lightweight/controller.yaml`.
 - Run one worker process per render node: `renderacre-worker --controller http://controller-host:7878 --name <node-name> --label app=blender`.
 - Put the controller behind a private network or authenticated reverse proxy.
 - Keep render executables and scripts on shared storage, then pass `PATH` parameters through OpenJD.
@@ -347,14 +347,18 @@ Recommended first deployment shape:
 
 SQLite is the default durable profile for small deployments. Start the
 controller with `--storage sqlite --sqlite-path <path>` or set
-`RFARM_STORAGE=sqlite` and `RFARM_SQLITE_PATH`. The scheduler API remains the
-same for REST workers, dashboard reads, and Python submitters; future Postgres
-or managed/cloud storage backends can replace the same storage boundary without
-changing submitter contracts.
+`RFARM_STORAGE=sqlite` and `RFARM_SQLITE_PATH`. Use `--dashboard-dir <path>` or
+`RFARM_DASHBOARD_DIR` to serve a built dashboard from the controller in the
+single-node profile. The scheduler API remains the same for REST workers,
+dashboard reads, and Python submitters; future Postgres or managed/cloud storage
+backends can replace the same storage boundary without changing submitter
+contracts.
 
 Cloud-ready backend, artifact, worker identity, and scheduler extension
 contracts are documented in
 [docs/extension-contracts.md](docs/extension-contracts.md).
+The one-command lightweight profile, service examples, and upgrade/backup
+guidance are documented in [docs/deployment.md](docs/deployment.md).
 
 ## Release
 

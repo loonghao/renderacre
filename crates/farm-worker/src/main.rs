@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use farm_core::{
     ArtifactKind, LogLevel, OpenJdRuntimeTask, Task, TaskArtifact, TaskComplete, TaskLease,
     TaskLeaseRenewal, TaskStarted, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch,
@@ -15,27 +18,118 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use openjd_expr::SerializedSymbolTable;
 use openjd_model::{ModelExtension, ModelProfile, SpecificationRevision, TaskParameterSet};
 use openjd_sessions::{ActionState, ActionStatus, Session, SessionConfig, StickyBitPolicy};
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 
 #[derive(Debug, Parser)]
 struct Args {
+    #[arg(long, env = "RFARM_CONFIG")]
+    config: Option<PathBuf>,
     #[arg(
         long,
         env = "RFARM_CONTROLLER",
         default_value = "http://127.0.0.1:7878"
     )]
     controller: String,
-    #[arg(long)]
+    #[arg(long, env = "RFARM_WORKER_NAME")]
     name: Option<String>,
-    #[arg(long = "label", value_parser = parse_label)]
+    #[arg(
+        long = "label",
+        env = "RFARM_WORKER_LABELS",
+        value_delimiter = ',',
+        value_parser = parse_label
+    )]
     labels: Vec<(String, String)>,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "RFARM_WORKER_SLOTS", default_value_t = 1)]
     slots: u32,
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, env = "RFARM_WORKER_POLL_SECONDS", default_value_t = 2)]
     poll_seconds: u64,
     #[arg(long, env = "RFARM_LEASE_RENEW_SECONDS", default_value_t = 30)]
     lease_renew_seconds: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WorkerConfig {
+    controller: Option<String>,
+    name: Option<String>,
+    labels: HashMap<String, String>,
+    slots: Option<u32>,
+    poll_seconds: Option<u64>,
+    lease_renew_seconds: Option<u64>,
+}
+
+impl Args {
+    fn load() -> Result<Self> {
+        Self::from_matches(Self::command().get_matches())
+    }
+
+    #[cfg(test)]
+    fn load_from<I, T>(iter: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let matches = Self::command().try_get_matches_from(iter)?;
+        Self::from_matches(matches)
+    }
+
+    fn from_matches(matches: ArgMatches) -> Result<Self> {
+        let mut args = Self::from_arg_matches(&matches)?;
+        let config = WorkerConfig::load(args.config.as_deref())?;
+        args.apply_config(config, &matches);
+        Ok(args)
+    }
+
+    fn apply_config(&mut self, config: WorkerConfig, matches: &ArgMatches) {
+        if value_from_default(matches, "controller") {
+            if let Some(controller) = config.controller {
+                self.controller = controller;
+            }
+        }
+        if matches.value_source("name").is_none() {
+            if let Some(name) = config.name {
+                self.name = Some(name);
+            }
+        }
+        if matches.value_source("labels").is_none() && !config.labels.is_empty() {
+            self.labels = config.labels.into_iter().collect();
+            self.labels
+                .sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        }
+        if value_from_default(matches, "slots") {
+            if let Some(slots) = config.slots {
+                self.slots = slots;
+            }
+        }
+        if value_from_default(matches, "poll_seconds") {
+            if let Some(poll_seconds) = config.poll_seconds {
+                self.poll_seconds = poll_seconds;
+            }
+        }
+        if value_from_default(matches, "lease_renew_seconds") {
+            if let Some(lease_renew_seconds) = config.lease_renew_seconds {
+                self.lease_renew_seconds = lease_renew_seconds;
+            }
+        }
+    }
+}
+
+impl WorkerConfig {
+    fn load(path: Option<&Path>) -> Result<Self> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse config file {}", path.display()))
+    }
+}
+
+fn value_from_default(matches: &ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::DefaultValue)
 }
 
 #[derive(Clone)]
@@ -122,7 +216,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let args = Args::load()?;
     let client = reqwest::Client::new();
     let controller = args.controller.trim_end_matches('/').to_string();
     let worker = register_worker(&client, &controller, &args).await?;
@@ -862,4 +956,87 @@ fn default_worker_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "local-worker".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_file_overrides_worker_defaults() {
+        let config_path = write_config(
+            "worker",
+            r#"
+controller: http://renderacre-controller:7878
+name: render-node-01
+labels:
+  app: blender
+  pool: lighting
+slots: 4
+poll_seconds: 5
+lease_renew_seconds: 20
+"#,
+        );
+
+        let args = Args::load_from([
+            "renderacre-worker",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .expect("config should load");
+
+        assert_eq!(args.controller, "http://renderacre-controller:7878");
+        assert_eq!(args.name.as_deref(), Some("render-node-01"));
+        assert_eq!(
+            args.labels,
+            vec![
+                ("app".to_string(), "blender".to_string()),
+                ("pool".to_string(), "lighting".to_string())
+            ]
+        );
+        assert_eq!(args.slots, 4);
+        assert_eq!(args.poll_seconds, 5);
+        assert_eq!(args.lease_renew_seconds, 20);
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn command_line_values_override_worker_config() {
+        let config_path = write_config(
+            "worker-cli",
+            r#"
+controller: http://renderacre-controller:7878
+name: render-node-01
+labels:
+  app: blender
+slots: 4
+"#,
+        );
+
+        let args = Args::load_from([
+            "renderacre-worker",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--controller",
+            "http://127.0.0.1:7878",
+            "--label",
+            "app=maya",
+            "--slots",
+            "2",
+        ])
+        .expect("config should load");
+
+        assert_eq!(args.controller, "http://127.0.0.1:7878");
+        assert_eq!(args.labels, vec![("app".to_string(), "maya".to_string())]);
+        assert_eq!(args.slots, 2);
+        assert_eq!(args.name.as_deref(), Some("render-node-01"));
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    fn write_config(name: &str, content: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("renderacre-{name}-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, content).expect("config should write");
+        path
+    }
 }
