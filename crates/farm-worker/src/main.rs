@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use farm_core::{
-    OpenJdRuntimeTask, TaskComplete, TaskLease, TaskStarted, WorkerCapacity, WorkerId, WorkerInfo,
-    WorkerRegister,
+    OpenJdRuntimeTask, TaskComplete, TaskLease, TaskLeaseRenewal, TaskStarted, WorkerCapacity,
+    WorkerId, WorkerInfo, WorkerRegister,
 };
 use openjd_expr::SerializedSymbolTable;
 use openjd_model::{ModelExtension, ModelProfile, SpecificationRevision, TaskParameterSet};
@@ -28,6 +28,8 @@ struct Args {
     slots: u32,
     #[arg(long, default_value_t = 2)]
     poll_seconds: u64,
+    #[arg(long, env = "RFARM_LEASE_RENEW_SECONDS", default_value_t = 30)]
+    lease_renew_seconds: u64,
 }
 
 #[tokio::main]
@@ -47,7 +49,16 @@ async fn main() -> Result<()> {
     loop {
         heartbeat(&client, &controller, worker.id).await?;
         match lease_task(&client, &controller, worker.id).await? {
-            Some(lease) => run_lease(&client, &controller, worker.id, lease).await?,
+            Some(lease) => {
+                run_lease(
+                    &client,
+                    &controller,
+                    worker.id,
+                    lease,
+                    args.lease_renew_seconds.max(1),
+                )
+                .await?
+            }
             None => tokio::time::sleep(Duration::from_secs(args.poll_seconds)).await,
         }
     }
@@ -104,6 +115,7 @@ async fn run_lease(
     controller: &str,
     worker_id: WorkerId,
     lease: TaskLease,
+    lease_renew_seconds: u64,
 ) -> Result<()> {
     tracing::info!(task_id = %lease.task.id, task = %lease.task.name, "running task");
     client
@@ -116,7 +128,9 @@ async fn run_lease(
         .await?
         .error_for_status()?;
 
-    let output = execute_task(&lease).await;
+    let output =
+        execute_with_lease_renewal(client, controller, worker_id, &lease, lease_renew_seconds)
+            .await;
     let completion = match output {
         Ok(output) => TaskComplete {
             worker_id,
@@ -137,6 +151,48 @@ async fn run_lease(
     client
         .post(format!("{controller}/v1/tasks/{}/complete", lease.task.id))
         .json(&completion)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+async fn execute_with_lease_renewal(
+    client: &reqwest::Client,
+    controller: &str,
+    worker_id: WorkerId,
+    lease: &TaskLease,
+    lease_renew_seconds: u64,
+) -> Result<ExecutionOutput> {
+    let mut execution = Box::pin(execute_task(lease));
+    let mut renew_timer = tokio::time::interval(Duration::from_secs(lease_renew_seconds.max(1)));
+    renew_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    renew_timer.tick().await;
+
+    loop {
+        tokio::select! {
+            output = &mut execution => return output,
+            _ = renew_timer.tick() => {
+                if let Err(error) = renew_task_lease(client, controller, worker_id, lease).await {
+                    tracing::warn!(task_id = %lease.task.id, error = %error, "failed to renew task lease");
+                }
+            }
+        }
+    }
+}
+
+async fn renew_task_lease(
+    client: &reqwest::Client,
+    controller: &str,
+    worker_id: WorkerId,
+    lease: &TaskLease,
+) -> Result<()> {
+    client
+        .post(format!("{controller}/v1/tasks/{}/renew", lease.task.id))
+        .json(&TaskLeaseRenewal {
+            worker_id,
+            lease_token: lease.lease_token.clone(),
+        })
         .send()
         .await?
         .error_for_status()?;
