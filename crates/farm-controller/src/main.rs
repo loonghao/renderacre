@@ -92,6 +92,17 @@ impl AppScheduler {
         }
     }
 
+    fn list_task_attempt_logs(
+        &self,
+        task_id: TaskId,
+        attempt_id: uuid::Uuid,
+    ) -> Result<Vec<FarmLogEntry>, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.list_task_attempt_logs(task_id, attempt_id),
+            Self::Sqlite(scheduler) => scheduler.list_task_attempt_logs(task_id, attempt_id),
+        }
+    }
+
     fn record_worker_logs(
         &self,
         worker_id: WorkerId,
@@ -273,6 +284,10 @@ fn app(scheduler: AppScheduler) -> Router {
         .route("/v1/tasks/{task_id}/renew", post(renew_task_lease))
         .route("/v1/tasks/{task_id}/complete", post(complete_task))
         .route(
+            "/v1/tasks/{task_id}/attempts/{attempt_id}/logs",
+            get(list_task_attempt_logs),
+        )
+        .route(
             "/v1/tasks/{task_id}/artifacts/{artifact_index}",
             get(download_task_artifact),
         )
@@ -383,6 +398,13 @@ async fn list_worker_logs(
     Ok(Json(scheduler.list_worker_logs(worker_id)?))
 }
 
+async fn list_task_attempt_logs(
+    State(scheduler): State<AppScheduler>,
+    Path((task_id, attempt_id)): Path<(TaskId, uuid::Uuid)>,
+) -> Result<Json<Vec<FarmLogEntry>>, ApiError> {
+    Ok(Json(scheduler.list_task_attempt_logs(task_id, attempt_id)?))
+}
+
 async fn record_worker_logs(
     State(scheduler): State<AppScheduler>,
     Path(worker_id): Path<WorkerId>,
@@ -486,6 +508,7 @@ impl From<FarmError> for ApiError {
             | FarmError::TaskNotFound(_)
             | FarmError::WorkerNotFound(_)
             | FarmError::ArtifactNotFound { .. } => StatusCode::NOT_FOUND,
+            FarmError::AttemptNotFound { .. } => StatusCode::NOT_FOUND,
             FarmError::InvalidSubmission(_) => StatusCode::BAD_REQUEST,
             FarmError::InvalidLease | FarmError::InvalidState(_) => StatusCode::CONFLICT,
             FarmError::LockPoisoned | FarmError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,

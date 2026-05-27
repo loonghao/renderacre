@@ -68,7 +68,7 @@ export function Inspector(props: {
         <button className="icon-button"><X /></button>
       </div>
       <div className="tabs">
-        {(["overview", "workflow", "tasks", "artifacts", "logs"] as const).map((tab) => (
+        {(["overview", "workflow", "tasks", "attempts", "artifacts", "logs"] as const).map((tab) => (
           <button className={props.tab === tab ? "active" : ""} key={tab} onClick={() => props.setTab(tab)}>
             {tabLabel(tab)}
           </button>
@@ -77,6 +77,7 @@ export function Inspector(props: {
       {props.tab === "overview" ? <OverviewTab job={props.job} worker={props.worker} /> : null}
       {props.tab === "workflow" ? <WorkflowTab job={props.job} /> : null}
       {props.tab === "tasks" ? <TasksTab job={props.job} onTaskAction={props.onTaskAction} /> : null}
+      {props.tab === "attempts" ? <AttemptsTab job={props.job} /> : null}
       {props.tab === "artifacts" ? <ArtifactsTab apiBase={props.apiBase} job={props.job} /> : null}
       {props.tab === "logs" ? <JobLogsTab job={props.job} logs={props.logs} /> : null}
       <JobActions job={props.job} onJobAction={props.onJobAction} />
@@ -119,12 +120,40 @@ function TasksTab({ job, onTaskAction }: { job: ApiJob; onTaskAction: (action: T
           <small>{upstream.length ? `${upstream.length} upstream` : "root"}</small>
           <small>{downstream.length ? `${downstream.length} downstream` : "terminal"}</small>
           <small>{requirementSummary(task)}</small>
+          <small>{task.attempt_records?.length ?? task.attempts} attempts</small>
           <small>{task.artifacts?.length ?? 0} artifacts</small>
           {missingDependencies.length ? <small className="dependency-warning">missing {missingDependencies.length}</small> : null}
           <div className="row-actions">
             <button className="icon-button" title="Requeue task" onClick={() => onTaskAction("requeue", task)}><RotateCcw /></button>
             <button className="icon-button danger" title="Cancel task" onClick={() => onTaskAction("cancel", task)}><XCircle /></button>
           </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function AttemptsTab({ job }: { job: ApiJob }) {
+  const attempts = job.tasks.flatMap((task) =>
+    (task.attempt_records ?? []).map((attempt) => ({ task, attempt }))
+  );
+  if (!attempts.length) {
+    return <EmptyPanel icon={<RotateCcw />} title="No attempts recorded" />;
+  }
+  return (
+    <section className="task-list">
+      {attempts.map(({ task, attempt }) => (
+        <article className="task-row" key={attempt.id}>
+          <div>
+            <strong>{task.name} #{attempt.number}</strong>
+            <span>{attempt.log_ref}</span>
+          </div>
+          <StateBadge state={attempt.state} />
+          <small>{attempt.exit_code ?? "-"}</small>
+          <small>{formatDate(attempt.started_at ?? attempt.leased_at)}</small>
+          <small>{attempt.completed_at ? formatDate(attempt.completed_at) : "active"}</small>
+          <small>{attempt.artifacts?.length ?? 0} artifacts</small>
+          {attempt.failure_summary ? <small className="dependency-warning">{attempt.failure_summary}</small> : null}
         </article>
       ))}
     </section>

@@ -1,9 +1,9 @@
 import { AlertCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import { formatTime } from "../lib/format";
-import type { FarmLog, JobState, TaskState } from "../types";
+import type { FarmLog, JobState, TaskAttemptState, TaskState } from "../types";
 
-export function StateBadge({ state }: { state: JobState | TaskState }) {
+export function StateBadge({ state }: { state: JobState | TaskState | TaskAttemptState }) {
   return <span className={`badge ${state}`}>{state}</span>;
 }
 
