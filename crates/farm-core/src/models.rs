@@ -414,6 +414,8 @@ pub struct FarmStats {
     pub jobs_total: usize,
     pub jobs_queued: usize,
     pub jobs_running: usize,
+    #[serde(default)]
+    pub jobs_paused: usize,
     pub jobs_succeeded: usize,
     pub jobs_failed: usize,
     pub tasks_total: usize,
@@ -484,6 +486,7 @@ pub enum ArtifactKind {
 pub enum JobState {
     Queued,
     Running,
+    Paused,
     Succeeded,
     Failed,
     Cancelled,
@@ -614,6 +617,11 @@ pub struct TaskStarted {
 pub struct TaskLeaseRenewal {
     pub worker_id: WorkerId,
     pub lease_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobPriorityUpdate {
+    pub priority: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

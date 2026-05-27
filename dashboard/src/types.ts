@@ -3,8 +3,10 @@ import type { Node } from "@xyflow/react";
 
 export type View = "queue" | "workers" | "openjd" | "logs" | "settings";
 export type InspectorTab = "overview" | "workflow" | "tasks" | "artifacts" | "logs";
-export type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type JobState = "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled";
 export type TaskState = "pending" | "leased" | "running" | "succeeded" | "failed" | "cancelled";
+export type JobAction = "pause" | "resume" | "cancel" | "priority";
+export type TaskAction = "cancel" | "requeue";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogSource = "controller" | "worker" | "task";
 
@@ -76,6 +78,7 @@ export interface ApiStats {
   jobs_total: number;
   jobs_queued: number;
   jobs_running: number;
+  jobs_paused: number;
   jobs_succeeded: number;
   jobs_failed: number;
   tasks_total: number;

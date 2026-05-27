@@ -1,7 +1,7 @@
-import { Columns3, Download, Filter, HardDrive, SlidersHorizontal, X } from "lucide-react";
+import { Columns3, Download, Filter, HardDrive, PauseCircle, Play, RotateCcw, SlidersHorizontal, X, XCircle } from "lucide-react";
 import { formatBytes, formatDate } from "../lib/format";
 import { appIcon, inferApplication, inferStep, leaseAge, progress, tabLabel } from "../lib/jobs";
-import type { ApiJob, ApiWorker, FarmLog, InspectorTab } from "../types";
+import type { ApiJob, ApiTask, ApiWorker, FarmLog, InspectorTab, JobAction, TaskAction } from "../types";
 import { EmptyPanel, LogStream, Progress, StateBadge, Terminal } from "./Common";
 import { buildWorkflow, WorkflowPreview, WorkflowTab } from "./Workflow";
 
@@ -56,6 +56,8 @@ export function Inspector(props: {
   job: ApiJob;
   worker?: ApiWorker;
   logs: FarmLog[];
+  onJobAction: (action: JobAction, job: ApiJob) => void;
+  onTaskAction: (action: TaskAction, task: ApiTask) => void;
   tab: InspectorTab;
   setTab: (tab: InspectorTab) => void;
 }) {
@@ -74,9 +76,10 @@ export function Inspector(props: {
       </div>
       {props.tab === "overview" ? <OverviewTab job={props.job} worker={props.worker} /> : null}
       {props.tab === "workflow" ? <WorkflowTab job={props.job} /> : null}
-      {props.tab === "tasks" ? <TasksTab job={props.job} /> : null}
+      {props.tab === "tasks" ? <TasksTab job={props.job} onTaskAction={props.onTaskAction} /> : null}
       {props.tab === "artifacts" ? <ArtifactsTab apiBase={props.apiBase} job={props.job} /> : null}
       {props.tab === "logs" ? <JobLogsTab job={props.job} logs={props.logs} /> : null}
+      <JobActions job={props.job} onJobAction={props.onJobAction} />
     </aside>
   );
 }
@@ -101,7 +104,7 @@ function OverviewTab({ job, worker }: { job: ApiJob; worker?: ApiWorker }) {
   );
 }
 
-function TasksTab({ job }: { job: ApiJob }) {
+function TasksTab({ job, onTaskAction }: { job: ApiJob; onTaskAction: (action: TaskAction, task: ApiTask) => void }) {
   const workflow = buildWorkflow(job);
   return (
     <section className="task-list">
@@ -117,8 +120,26 @@ function TasksTab({ job }: { job: ApiJob }) {
           <small>{downstream.length ? `${downstream.length} downstream` : "terminal"}</small>
           <small>{task.artifacts?.length ?? 0} artifacts</small>
           {missingDependencies.length ? <small className="dependency-warning">missing {missingDependencies.length}</small> : null}
+          <div className="row-actions">
+            <button className="icon-button" title="Requeue task" onClick={() => onTaskAction("requeue", task)}><RotateCcw /></button>
+            <button className="icon-button danger" title="Cancel task" onClick={() => onTaskAction("cancel", task)}><XCircle /></button>
+          </div>
         </article>
       ))}
+    </section>
+  );
+}
+
+function JobActions({ job, onJobAction }: { job: ApiJob; onJobAction: (action: JobAction, job: ApiJob) => void }) {
+  return (
+    <section className="inspector-actions">
+      {job.state === "paused" ? (
+        <button className="button" onClick={() => onJobAction("resume", job)}><Play />Resume</button>
+      ) : (
+        <button className="button" onClick={() => onJobAction("pause", job)}><PauseCircle />Pause</button>
+      )}
+      <button className="button" onClick={() => onJobAction("priority", job)}><SlidersHorizontal />Priority</button>
+      <button className="button danger" onClick={() => onJobAction("cancel", job)}><XCircle />Cancel</button>
     </section>
   );
 }

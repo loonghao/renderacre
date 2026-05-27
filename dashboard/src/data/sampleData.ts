@@ -5,6 +5,7 @@ export const sampleSnapshot: DashboardSnapshot = {
     jobs_total: 42,
     jobs_queued: 11,
     jobs_running: 14,
+    jobs_paused: 0,
     jobs_succeeded: 14,
     jobs_failed: 3,
     tasks_total: 12842,

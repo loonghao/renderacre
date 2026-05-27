@@ -10,8 +10,8 @@ use axum::{Json, Router};
 use clap::{Parser, ValueEnum};
 use farm_core::{
     DashboardSnapshot, FarmError, FarmLogEntry, FarmStats, InMemoryScheduler, Job, JobId,
-    JobSubmit, SchedulerConfig, SqliteScheduler, Task, TaskComplete, TaskId, TaskLease,
-    TaskLeaseRenewal, TaskStarted, WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister,
+    JobPriorityUpdate, JobSubmit, SchedulerConfig, SqliteScheduler, Task, TaskComplete, TaskId,
+    TaskLease, TaskLeaseRenewal, TaskStarted, WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister,
 };
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -99,6 +99,48 @@ impl AppScheduler {
         match self {
             Self::Memory(scheduler) => scheduler.record_worker_logs(worker_id, batch),
             Self::Sqlite(scheduler) => scheduler.record_worker_logs(worker_id, batch),
+        }
+    }
+
+    fn pause_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.pause_job(job_id),
+            Self::Sqlite(scheduler) => scheduler.pause_job(job_id),
+        }
+    }
+
+    fn resume_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.resume_job(job_id),
+            Self::Sqlite(scheduler) => scheduler.resume_job(job_id),
+        }
+    }
+
+    fn cancel_job(&self, job_id: JobId) -> Result<Job, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.cancel_job(job_id),
+            Self::Sqlite(scheduler) => scheduler.cancel_job(job_id),
+        }
+    }
+
+    fn update_job_priority(&self, job_id: JobId, priority: i32) -> Result<Job, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.update_job_priority(job_id, priority),
+            Self::Sqlite(scheduler) => scheduler.update_job_priority(job_id, priority),
+        }
+    }
+
+    fn cancel_task(&self, task_id: TaskId) -> Result<Task, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.cancel_task(task_id),
+            Self::Sqlite(scheduler) => scheduler.cancel_task(task_id),
+        }
+    }
+
+    fn requeue_task(&self, task_id: TaskId) -> Result<Task, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.requeue_task(task_id),
+            Self::Sqlite(scheduler) => scheduler.requeue_task(task_id),
         }
     }
 
@@ -194,6 +236,10 @@ fn app(scheduler: AppScheduler) -> Router {
         .route("/v1/stats", get(get_stats))
         .route("/v1/jobs", get(list_jobs).post(submit_job))
         .route("/v1/jobs/{job_id}", get(get_job))
+        .route("/v1/jobs/{job_id}/pause", post(pause_job))
+        .route("/v1/jobs/{job_id}/resume", post(resume_job))
+        .route("/v1/jobs/{job_id}/cancel", post(cancel_job))
+        .route("/v1/jobs/{job_id}/priority", post(update_job_priority))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/register", post(register_worker))
         .route(
@@ -202,6 +248,8 @@ fn app(scheduler: AppScheduler) -> Router {
         )
         .route("/v1/workers/{worker_id}/heartbeat", post(heartbeat_worker))
         .route("/v1/workers/{worker_id}/lease", post(lease_task))
+        .route("/v1/tasks/{task_id}/cancel", post(cancel_task))
+        .route("/v1/tasks/{task_id}/requeue", post(requeue_task))
         .route("/v1/tasks/{task_id}/started", post(mark_task_started))
         .route("/v1/tasks/{task_id}/renew", post(renew_task_lease))
         .route("/v1/tasks/{task_id}/complete", post(complete_task))
@@ -234,6 +282,37 @@ async fn get_job(
     Path(job_id): Path<JobId>,
 ) -> Result<Json<Job>, ApiError> {
     Ok(Json(scheduler.get_job(job_id)?))
+}
+
+async fn pause_job(
+    State(scheduler): State<AppScheduler>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(scheduler.pause_job(job_id)?))
+}
+
+async fn resume_job(
+    State(scheduler): State<AppScheduler>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(scheduler.resume_job(job_id)?))
+}
+
+async fn cancel_job(
+    State(scheduler): State<AppScheduler>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(scheduler.cancel_job(job_id)?))
+}
+
+async fn update_job_priority(
+    State(scheduler): State<AppScheduler>,
+    Path(job_id): Path<JobId>,
+    Json(update): Json<JobPriorityUpdate>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(
+        scheduler.update_job_priority(job_id, update.priority)?,
+    ))
 }
 
 async fn list_workers(
@@ -292,6 +371,20 @@ async fn lease_task(
     Path(worker_id): Path<WorkerId>,
 ) -> Result<Json<Option<TaskLease>>, ApiError> {
     Ok(Json(scheduler.lease_task(worker_id)?))
+}
+
+async fn cancel_task(
+    State(scheduler): State<AppScheduler>,
+    Path(task_id): Path<TaskId>,
+) -> Result<Json<Task>, ApiError> {
+    Ok(Json(scheduler.cancel_task(task_id)?))
+}
+
+async fn requeue_task(
+    State(scheduler): State<AppScheduler>,
+    Path(task_id): Path<TaskId>,
+) -> Result<Json<Task>, ApiError> {
+    Ok(Json(scheduler.requeue_task(task_id)?))
 }
 
 async fn mark_task_started(
@@ -362,7 +455,7 @@ impl From<FarmError> for ApiError {
             | FarmError::WorkerNotFound(_)
             | FarmError::ArtifactNotFound { .. } => StatusCode::NOT_FOUND,
             FarmError::InvalidSubmission(_) => StatusCode::BAD_REQUEST,
-            FarmError::InvalidLease => StatusCode::CONFLICT,
+            FarmError::InvalidLease | FarmError::InvalidState(_) => StatusCode::CONFLICT,
             FarmError::LockPoisoned | FarmError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self {
