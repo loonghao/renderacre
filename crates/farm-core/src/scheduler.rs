@@ -9,9 +9,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    DashboardSnapshot, FarmStats, Job, JobId, JobState, JobSubmit, Task, TaskComplete, TaskId,
-    TaskLease, TaskLeaseInfo, TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerId,
-    WorkerInfo, WorkerRegister, WorkerState,
+    DashboardSnapshot, FarmLogEntry, FarmStats, Job, JobId, JobState, JobSubmit, LogLevel,
+    LogSource, Task, TaskArtifact, TaskComplete, TaskId, TaskLease, TaskLeaseInfo,
+    TaskLeaseRenewal, TaskStarted, TaskState, TaskSubmit, WorkerId, WorkerInfo, WorkerLogBatch,
+    WorkerRegister, WorkerState,
 };
 use crate::openjd::openjd_to_tasks;
 
@@ -23,6 +24,11 @@ pub enum FarmError {
     TaskNotFound(TaskId),
     #[error("worker was not found: {0}")]
     WorkerNotFound(WorkerId),
+    #[error("artifact was not found for task {task_id}: {artifact_index}")]
+    ArtifactNotFound {
+        task_id: TaskId,
+        artifact_index: usize,
+    },
     #[error("invalid submission: {0}")]
     InvalidSubmission(String),
     #[error("lease is invalid or expired")]
@@ -56,7 +62,10 @@ impl Default for SchedulerConfig {
 struct SchedulerState {
     jobs: HashMap<JobId, Job>,
     workers: HashMap<WorkerId, WorkerInfo>,
+    logs: Vec<FarmLogEntry>,
 }
+
+const MAX_LOG_ENTRIES: usize = 500;
 
 impl InMemoryScheduler {
     pub fn with_config(config: SchedulerConfig) -> Self {
@@ -135,6 +144,18 @@ impl InMemoryScheduler {
 
         let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
         state.jobs.insert(job.id, job.clone());
+        push_log(
+            &mut state,
+            NewLog {
+                level: LogLevel::Info,
+                source: LogSource::Controller,
+                message: format!("job submitted: {}", job.name),
+                job_id: Some(job.id),
+                task_id: None,
+                worker_id: None,
+                stream: None,
+            },
+        );
         Ok(job)
     }
 
@@ -171,7 +192,26 @@ impl InMemoryScheduler {
             stats: compute_stats(&state),
             jobs,
             workers,
+            logs: state.logs.clone(),
         })
+    }
+
+    pub fn list_logs(&self) -> Result<Vec<FarmLogEntry>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        Ok(state.logs.clone())
+    }
+
+    pub fn list_worker_logs(&self, worker_id: WorkerId) -> Result<Vec<FarmLogEntry>, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        if !state.workers.contains_key(&worker_id) {
+            return Err(FarmError::WorkerNotFound(worker_id));
+        }
+        Ok(state
+            .logs
+            .iter()
+            .filter(|entry| entry.worker_id == Some(worker_id))
+            .cloned()
+            .collect())
     }
 
     pub fn register_worker(&self, registration: WorkerRegister) -> Result<WorkerInfo, FarmError> {
@@ -187,7 +227,47 @@ impl InMemoryScheduler {
         };
         let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
         state.workers.insert(worker.id, worker.clone());
+        push_log(
+            &mut state,
+            NewLog {
+                level: LogLevel::Info,
+                source: LogSource::Controller,
+                message: format!("worker registered: {}", worker.name),
+                job_id: None,
+                task_id: None,
+                worker_id: Some(worker.id),
+                stream: None,
+            },
+        );
         Ok(worker)
+    }
+
+    pub fn record_worker_logs(
+        &self,
+        worker_id: WorkerId,
+        batch: WorkerLogBatch,
+    ) -> Result<Vec<FarmLogEntry>, FarmError> {
+        let mut state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        if !state.workers.contains_key(&worker_id) {
+            return Err(FarmError::WorkerNotFound(worker_id));
+        }
+        let mut recorded = Vec::new();
+        for input in batch.entries {
+            let entry = push_log(
+                &mut state,
+                NewLog {
+                    level: input.level,
+                    source: LogSource::Worker,
+                    message: input.message,
+                    job_id: input.job_id,
+                    task_id: input.task_id,
+                    worker_id: Some(worker_id),
+                    stream: input.stream,
+                },
+            );
+            recorded.push(entry);
+        }
+        Ok(recorded)
     }
 
     pub fn heartbeat_worker(&self, worker_id: WorkerId) -> Result<WorkerInfo, FarmError> {
@@ -257,7 +337,20 @@ impl InMemoryScheduler {
             });
             task.clone()
         };
+        let task_name = leased_task.name.clone();
         update_job_state(job);
+        push_log(
+            &mut state,
+            NewLog {
+                level: LogLevel::Info,
+                source: LogSource::Controller,
+                message: format!("leased task: {task_name}"),
+                job_id: Some(job_id),
+                task_id: Some(task_id),
+                worker_id: Some(worker_id),
+                stream: None,
+            },
+        );
 
         Ok(Some(TaskLease {
             task: leased_task,
@@ -286,6 +379,18 @@ impl InMemoryScheduler {
         task.updated_at = Utc::now();
         let task = task.clone();
         update_job_state(job);
+        push_log(
+            &mut state,
+            NewLog {
+                level: LogLevel::Info,
+                source: LogSource::Controller,
+                message: format!("task started: {}", task.name),
+                job_id: Some(job_id),
+                task_id: Some(task.id),
+                worker_id: Some(started.worker_id),
+                stream: None,
+            },
+        );
         Ok(task)
     }
 
@@ -336,6 +441,7 @@ impl InMemoryScheduler {
         task.last_exit_code = Some(completion.exit_code);
         task.stdout_tail = completion.stdout_tail;
         task.stderr_tail = completion.stderr_tail;
+        task.artifacts = completion.artifacts;
         task.lease = None;
         task.state = if completion.exit_code == 0 {
             TaskState::Succeeded
@@ -349,11 +455,52 @@ impl InMemoryScheduler {
 
         let task = task.clone();
         update_job_state(job);
+        let level = if completion.exit_code == 0 {
+            LogLevel::Info
+        } else {
+            LogLevel::Error
+        };
+        push_log(
+            &mut state,
+            NewLog {
+                level,
+                source: LogSource::Controller,
+                message: format!(
+                    "task completed: {} (exit {})",
+                    task.name, completion.exit_code
+                ),
+                job_id: Some(job_id),
+                task_id: Some(task.id),
+                worker_id: Some(completion.worker_id),
+                stream: None,
+            },
+        );
         Ok(task)
     }
 
     fn lease_ttl(&self) -> Duration {
         Duration::seconds(self.config.lease_ttl_seconds.max(1))
+    }
+
+    pub fn get_task_artifact(
+        &self,
+        task_id: TaskId,
+        artifact_index: usize,
+    ) -> Result<TaskArtifact, FarmError> {
+        let state = self.inner.lock().map_err(|_| FarmError::LockPoisoned)?;
+        let (job_id, task_index) = find_task_location(&state, task_id)?;
+        let task = state
+            .jobs
+            .get(&job_id)
+            .and_then(|job| job.tasks.get(task_index))
+            .ok_or(FarmError::TaskNotFound(task_id))?;
+        task.artifacts
+            .get(artifact_index)
+            .cloned()
+            .ok_or(FarmError::ArtifactNotFound {
+                task_id,
+                artifact_index,
+            })
     }
 }
 
@@ -404,6 +551,22 @@ impl SqliteScheduler {
         self.inner.dashboard_snapshot()
     }
 
+    pub fn list_logs(&self) -> Result<Vec<FarmLogEntry>, FarmError> {
+        self.inner.list_logs()
+    }
+
+    pub fn list_worker_logs(&self, worker_id: WorkerId) -> Result<Vec<FarmLogEntry>, FarmError> {
+        self.inner.list_worker_logs(worker_id)
+    }
+
+    pub fn record_worker_logs(
+        &self,
+        worker_id: WorkerId,
+        batch: WorkerLogBatch,
+    ) -> Result<Vec<FarmLogEntry>, FarmError> {
+        self.write_durably(|inner| inner.record_worker_logs(worker_id, batch))
+    }
+
     pub fn register_worker(&self, registration: WorkerRegister) -> Result<WorkerInfo, FarmError> {
         self.write_durably(|inner| inner.register_worker(registration))
     }
@@ -438,6 +601,14 @@ impl SqliteScheduler {
         completion: TaskComplete,
     ) -> Result<Task, FarmError> {
         self.write_durably(|inner| inner.complete_task(task_id, completion))
+    }
+
+    pub fn get_task_artifact(
+        &self,
+        task_id: TaskId,
+        artifact_index: usize,
+    ) -> Result<TaskArtifact, FarmError> {
+        self.inner.get_task_artifact(task_id, artifact_index)
     }
 
     fn write_durably<T>(
@@ -546,6 +717,8 @@ fn task_from_submit(
         attempts: 0,
         max_retries: submission.max_retries.unwrap_or(job_max_retries),
         lease: None,
+        artifact_paths: submission.artifact_paths,
+        artifacts: Vec::new(),
         created_at: now,
         updated_at: now,
         started_at: None,
@@ -592,6 +765,36 @@ fn expire_old_leases(state: &mut SchedulerState) {
             update_job_state(job);
         }
     }
+}
+
+struct NewLog {
+    level: LogLevel,
+    source: LogSource,
+    message: String,
+    job_id: Option<JobId>,
+    task_id: Option<TaskId>,
+    worker_id: Option<WorkerId>,
+    stream: Option<String>,
+}
+
+fn push_log(state: &mut SchedulerState, log: NewLog) -> FarmLogEntry {
+    let entry = FarmLogEntry {
+        id: Uuid::new_v4(),
+        timestamp: Utc::now(),
+        level: log.level,
+        source: log.source,
+        stream: log.stream,
+        message: log.message,
+        job_id: log.job_id,
+        task_id: log.task_id,
+        worker_id: log.worker_id,
+    };
+    state.logs.push(entry.clone());
+    if state.logs.len() > MAX_LOG_ENTRIES {
+        let overflow = state.logs.len() - MAX_LOG_ENTRIES;
+        state.logs.drain(0..overflow);
+    }
+    entry
 }
 
 fn find_task_location(
@@ -700,6 +903,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec![],
                         max_retries: None,
+                        artifact_paths: Vec::new(),
                         openjd: None,
                     },
                     TaskSubmit {
@@ -707,6 +911,7 @@ mod tests {
                         command: command("echo"),
                         dependencies: vec!["prepare".to_string()],
                         max_retries: None,
+                        artifact_paths: Vec::new(),
                         openjd: None,
                     },
                 ],
@@ -734,6 +939,7 @@ mod tests {
                     exit_code: 0,
                     stdout_tail: None,
                     stderr_tail: None,
+                    artifacts: Vec::new(),
                 },
             )
             .expect("completion should work");
@@ -758,6 +964,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     max_retries: None,
+                    artifact_paths: Vec::new(),
                     openjd: None,
                 }],
                 openjd: None,
@@ -850,6 +1057,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     max_retries: None,
+                    artifact_paths: Vec::new(),
                     openjd: None,
                 }],
                 openjd: None,
@@ -875,6 +1083,7 @@ mod tests {
                     exit_code: 1,
                     stdout_tail: Some("stdout".to_string()),
                     stderr_tail: Some("stderr".to_string()),
+                    artifacts: Vec::new(),
                 },
             )
             .expect("failed task should requeue");
@@ -903,6 +1112,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     max_retries: None,
+                    artifact_paths: Vec::new(),
                     openjd: None,
                 }],
                 openjd: None,
@@ -974,6 +1184,7 @@ mod tests {
                     command: command("echo"),
                     dependencies: vec![],
                     max_retries: None,
+                    artifact_paths: Vec::new(),
                     openjd: None,
                 }],
                 openjd: None,

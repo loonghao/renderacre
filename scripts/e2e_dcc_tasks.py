@@ -213,6 +213,14 @@ def submit_openjd(port, name, template_path, parameters):
     )
 
 
+def submit_job(port, payload):
+    return request_json(
+        "POST",
+        "http://127.0.0.1:{0}/v1/jobs".format(port),
+        payload,
+    )
+
+
 def wait_job(port, job_id, timeout=180):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -239,6 +247,12 @@ def request_json(method, url, payload=None):
         raise RuntimeError("{0} {1} failed: {2}".format(method, url, body))
 
 
+def request_bytes(method, url):
+    request = urllib.request.Request(url, method=method)
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.read()
+
+
 def run_python_job(repo, port, run_dir, python_exe):
     executable = require_executable(python_exe, "Python")
     template = repo / "examples" / "openjd_python_frames.yaml"
@@ -254,7 +268,47 @@ def run_python_job(repo, port, run_dir, python_exe):
     final = require_success(port, job["id"], "python")
     if len(final["tasks"]) != 5:
         raise AssertionError("python job expected 5 tasks, got {0}".format(len(final["tasks"])))
-    return {"name": "python", "job_id": final["id"], "tasks": len(final["tasks"])}
+    require_worker_logs(port, ["renderacre-ci frame 1"])
+
+    artifact_dir = clean_dir(run_dir / "python-artifacts")
+    artifact_file = artifact_dir / "direct_artifact.txt"
+    direct_code = "\n".join(
+        [
+            "from pathlib import Path",
+            "import time",
+            "path = Path({0!r})".format(str(artifact_file)),
+            "path.parent.mkdir(parents=True, exist_ok=True)",
+            "print('python direct artifact task starting', flush=True)",
+            "path.write_text('renderacre artifact e2e\\n', encoding='utf-8')",
+            "print(f'RENDERACRE_ARTIFACT={path}', flush=True)",
+            "time.sleep(0.2)",
+            "print('python direct artifact task done', flush=True)",
+        ]
+    )
+    direct = submit_job(
+        port,
+        {
+            "name": "e2e-python-direct-artifact",
+            "tasks": [
+                {
+                    "name": "write-artifact",
+                    "command": {
+                        "executable": executable,
+                        "args": ["-c", direct_code],
+                    },
+                    "artifact_paths": [str(artifact_dir)],
+                }
+            ],
+        },
+    )
+    direct_final = require_success(port, direct["id"], "python-direct")
+    require_artifacts(port, direct_final, min_count=1)
+    require_worker_logs(port, ["python direct artifact task done"])
+    return {
+        "name": "python",
+        "job_id": final["id"],
+        "tasks": len(final["tasks"]) + len(direct_final["tasks"]),
+    }
 
 
 def run_blender_job(repo, port, run_dir, blender_exe):
@@ -273,6 +327,8 @@ def run_blender_job(repo, port, run_dir, blender_exe):
     )
     final = require_success(port, job["id"], "blender", timeout=300)
     require_files(output_dir, "blender_frame_{0:04d}.png", range(1, 4))
+    require_artifacts(port, final, min_count=3, png=True)
+    require_worker_logs(port, ["RENDERACRE_ARTIFACT="])
     return {"name": "blender", "job_id": final["id"], "tasks": len(final["tasks"])}
 
 
@@ -307,6 +363,59 @@ def require_success(port, job_id, label, timeout=180):
             )
         )
     return final
+
+
+def require_worker_logs(port, expected_messages):
+    snapshot = request_json("GET", "http://127.0.0.1:{0}/v1/dashboard".format(port))
+    logs = snapshot.get("logs", [])
+    worker_logs = [log for log in logs if log.get("source") == "worker"]
+    if not worker_logs:
+        raise AssertionError("expected worker logs in dashboard snapshot")
+    messages = "\n".join(log.get("message", "") for log in worker_logs)
+    missing = [message for message in expected_messages if message not in messages]
+    if missing:
+        raise AssertionError("missing expected worker log messages: {0}".format(", ".join(missing)))
+
+
+def require_artifacts(port, job, min_count, png=False):
+    artifacts = []
+    for task in job.get("tasks", []):
+        for index, artifact in enumerate(task.get("artifacts", [])):
+            artifacts.append((task, index, artifact))
+    if len(artifacts) < min_count:
+        raise AssertionError(
+            "expected at least {0} artifacts, got {1}: {2}".format(
+                min_count,
+                len(artifacts),
+                json.dumps(job, indent=2),
+            )
+        )
+
+    first_task, first_index, first_artifact = artifacts[0]
+    data = request_bytes(
+        "GET",
+        "http://127.0.0.1:{0}/v1/tasks/{1}/artifacts/{2}".format(
+            port,
+            first_task["id"],
+            first_index,
+        ),
+    )
+    if not data:
+        raise AssertionError("downloaded artifact was empty: {0}".format(first_artifact))
+    if png:
+        png_artifact = next(
+            ((task, index, artifact) for task, index, artifact in artifacts if artifact.get("kind") == "image"),
+            None,
+        )
+        if not png_artifact:
+            raise AssertionError("expected at least one image artifact")
+        task, index, artifact = png_artifact
+        data = request_bytes(
+            "GET",
+            "http://127.0.0.1:{0}/v1/tasks/{1}/artifacts/{2}".format(port, task["id"], index),
+        )
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise AssertionError("artifact is not a PNG: {0}".format(artifact))
 
 
 def clean_dir(path):

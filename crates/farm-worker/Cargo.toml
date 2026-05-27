@@ -10,6 +10,7 @@ homepage.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 farm-core = { path = "../farm-core" }
 openjd-expr.workspace = true

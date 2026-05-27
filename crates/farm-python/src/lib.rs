@@ -23,6 +23,7 @@ fn command_job(name: String, executable: String, args: Option<Vec<String>>) -> P
             },
             dependencies: Vec::new(),
             max_retries: None,
+            artifact_paths: Vec::new(),
             openjd: None,
         }],
     };

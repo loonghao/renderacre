@@ -34,8 +34,10 @@ def main() -> None:
         bpy.context.scene.render.engine = "BLENDER_EEVEE"
     except TypeError:
         pass
-    bpy.context.scene.render.filepath = str(output_dir / f"blender_frame_{args.frame:04d}.png")
+    output_path = output_dir / f"blender_frame_{args.frame:04d}.png"
+    bpy.context.scene.render.filepath = str(output_path)
     bpy.ops.render.render(write_still=True)
+    print(f"RENDERACRE_ARTIFACT={output_path}", flush=True)
 
 
 if __name__ == "__main__":

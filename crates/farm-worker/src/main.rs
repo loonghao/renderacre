@@ -1,15 +1,19 @@
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use farm_core::{
-    OpenJdRuntimeTask, TaskComplete, TaskLease, TaskLeaseRenewal, TaskStarted, WorkerCapacity,
-    WorkerId, WorkerInfo, WorkerRegister,
+    ArtifactKind, LogLevel, OpenJdRuntimeTask, Task, TaskArtifact, TaskComplete, TaskLease,
+    TaskLeaseRenewal, TaskStarted, WorkerCapacity, WorkerId, WorkerInfo, WorkerLogBatch,
+    WorkerLogInput, WorkerRegister,
 };
 use openjd_expr::SerializedSymbolTable;
 use openjd_model::{ModelExtension, ModelProfile, SpecificationRevision, TaskParameterSet};
 use openjd_sessions::{ActionState, Session, SessionConfig, StickyBitPolicy};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 
 #[derive(Debug, Parser)]
@@ -32,6 +36,78 @@ struct Args {
     lease_renew_seconds: u64,
 }
 
+#[derive(Clone)]
+struct WorkerLogSink {
+    client: reqwest::Client,
+    controller: String,
+    worker_id: WorkerId,
+}
+
+impl WorkerLogSink {
+    fn new(client: reqwest::Client, controller: String, worker_id: WorkerId) -> Self {
+        Self {
+            client,
+            controller,
+            worker_id,
+        }
+    }
+
+    async fn post_line(
+        &self,
+        level: LogLevel,
+        stream: Option<String>,
+        message: String,
+        job_id: Option<uuid::Uuid>,
+        task_id: Option<uuid::Uuid>,
+    ) {
+        self.post_batch(vec![WorkerLogInput {
+            level,
+            stream,
+            message,
+            job_id,
+            task_id,
+        }])
+        .await;
+    }
+
+    async fn post_lines(
+        &self,
+        job_id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        stream_name: &str,
+        level: LogLevel,
+        buffer: &str,
+    ) {
+        let entries = buffer
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| WorkerLogInput {
+                level: level.clone(),
+                stream: Some(stream_name.to_string()),
+                message: line.to_string(),
+                job_id: Some(job_id),
+                task_id: Some(task_id),
+            })
+            .collect::<Vec<_>>();
+        self.post_batch(entries).await;
+    }
+
+    async fn post_batch(&self, entries: Vec<WorkerLogInput>) {
+        if entries.is_empty() {
+            return;
+        }
+        let _ = self
+            .client
+            .post(format!(
+                "{}/v1/workers/{}/logs",
+                self.controller, self.worker_id
+            ))
+            .json(&WorkerLogBatch { entries })
+            .send()
+            .await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -45,6 +121,16 @@ async fn main() -> Result<()> {
     let controller = args.controller.trim_end_matches('/').to_string();
     let worker = register_worker(&client, &controller, &args).await?;
     tracing::info!(worker_id = %worker.id, "worker registered");
+    let log_sink = WorkerLogSink::new(client.clone(), controller.clone(), worker.id);
+    log_sink
+        .post_line(
+            LogLevel::Info,
+            None,
+            "worker online".to_string(),
+            None,
+            None,
+        )
+        .await;
 
     loop {
         heartbeat(&client, &controller, worker.id).await?;
@@ -53,7 +139,7 @@ async fn main() -> Result<()> {
                 run_lease(
                     &client,
                     &controller,
-                    worker.id,
+                    &log_sink,
                     lease,
                     args.lease_renew_seconds.max(1),
                 )
@@ -113,15 +199,24 @@ async fn lease_task(
 async fn run_lease(
     client: &reqwest::Client,
     controller: &str,
-    worker_id: WorkerId,
+    log_sink: &WorkerLogSink,
     lease: TaskLease,
     lease_renew_seconds: u64,
 ) -> Result<()> {
     tracing::info!(task_id = %lease.task.id, task = %lease.task.name, "running task");
+    log_sink
+        .post_line(
+            LogLevel::Info,
+            None,
+            format!("starting task {}", lease.task.name),
+            Some(lease.task.job_id),
+            Some(lease.task.id),
+        )
+        .await;
     client
         .post(format!("{controller}/v1/tasks/{}/started", lease.task.id))
         .json(&TaskStarted {
-            worker_id,
+            worker_id: log_sink.worker_id,
             lease_token: lease.lease_token.clone(),
         })
         .send()
@@ -129,23 +224,36 @@ async fn run_lease(
         .error_for_status()?;
 
     let output =
-        execute_with_lease_renewal(client, controller, worker_id, &lease, lease_renew_seconds)
-            .await;
+        execute_with_lease_renewal(log_sink, controller, &lease, lease_renew_seconds).await;
     let completion = match output {
         Ok(output) => TaskComplete {
-            worker_id,
+            worker_id: log_sink.worker_id,
             lease_token: lease.lease_token,
             exit_code: output.exit_code,
             stdout_tail: Some(tail_text(output.stdout.as_bytes(), 8192)),
             stderr_tail: Some(tail_text(output.stderr.as_bytes(), 8192)),
+            artifacts: output.artifacts,
         },
-        Err(err) => TaskComplete {
-            worker_id,
-            lease_token: lease.lease_token,
-            exit_code: -1,
-            stdout_tail: None,
-            stderr_tail: Some(err.to_string()),
-        },
+        Err(err) => {
+            let message = err.to_string();
+            log_sink
+                .post_line(
+                    LogLevel::Error,
+                    Some("worker".to_string()),
+                    message.clone(),
+                    Some(lease.task.job_id),
+                    Some(lease.task.id),
+                )
+                .await;
+            TaskComplete {
+                worker_id: log_sink.worker_id,
+                lease_token: lease.lease_token,
+                exit_code: -1,
+                stdout_tail: None,
+                stderr_tail: Some(message),
+                artifacts: Vec::new(),
+            }
+        }
     };
 
     client
@@ -158,13 +266,12 @@ async fn run_lease(
 }
 
 async fn execute_with_lease_renewal(
-    client: &reqwest::Client,
+    log_sink: &WorkerLogSink,
     controller: &str,
-    worker_id: WorkerId,
     lease: &TaskLease,
     lease_renew_seconds: u64,
 ) -> Result<ExecutionOutput> {
-    let mut execution = Box::pin(execute_task(lease));
+    let mut execution = Box::pin(execute_task(log_sink, lease));
     let mut renew_timer = tokio::time::interval(Duration::from_secs(lease_renew_seconds.max(1)));
     renew_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     renew_timer.tick().await;
@@ -173,7 +280,7 @@ async fn execute_with_lease_renewal(
         tokio::select! {
             output = &mut execution => return output,
             _ = renew_timer.tick() => {
-                if let Err(error) = renew_task_lease(client, controller, worker_id, lease).await {
+                if let Err(error) = renew_task_lease(&log_sink.client, controller, log_sink.worker_id, lease).await {
                     tracing::warn!(task_id = %lease.task.id, error = %error, "failed to renew task lease");
                 }
             }
@@ -203,17 +310,21 @@ struct ExecutionOutput {
     exit_code: i32,
     stdout: String,
     stderr: String,
+    artifacts: Vec<TaskArtifact>,
 }
 
-async fn execute_task(lease: &TaskLease) -> Result<ExecutionOutput> {
-    if let Some(openjd) = &lease.task.openjd {
-        execute_openjd(openjd).await
+async fn execute_task(log_sink: &WorkerLogSink, lease: &TaskLease) -> Result<ExecutionOutput> {
+    let started_at = SystemTime::now();
+    let mut output = if let Some(openjd) = &lease.task.openjd {
+        execute_openjd(log_sink, &lease.task, openjd).await?
     } else {
-        execute_command(lease).await
-    }
+        execute_command(log_sink, lease).await?
+    };
+    output.artifacts = collect_artifacts(&lease.task, &output.stdout, &output.stderr, started_at);
+    Ok(output)
 }
 
-async fn execute_command(lease: &TaskLease) -> Result<ExecutionOutput> {
+async fn execute_command(log_sink: &WorkerLogSink, lease: &TaskLease) -> Result<ExecutionOutput> {
     let command = &lease.task.command;
     let mut child = Command::new(&command.executable);
     child.args(&command.args);
@@ -221,21 +332,70 @@ async fn execute_command(lease: &TaskLease) -> Result<ExecutionOutput> {
     if let Some(working_dir) = &command.working_dir {
         child.current_dir(working_dir);
     }
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::piped());
 
-    let future = child.output();
-    if let Some(timeout_seconds) = command.timeout_seconds {
-        let output = tokio::time::timeout(Duration::from_secs(timeout_seconds), future)
-            .await
-            .context("task timed out")?
-            .context("task process failed")?;
-        Ok(process_output(output))
+    let mut child = child.spawn().context("task process failed to spawn")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("task stdout pipe was unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("task stderr pipe was unavailable")?;
+    let stdout_task = tokio::spawn(read_stream_lines(
+        stdout,
+        log_sink.clone(),
+        lease.task.job_id,
+        lease.task.id,
+        "stdout",
+        LogLevel::Info,
+    ));
+    let stderr_task = tokio::spawn(read_stream_lines(
+        stderr,
+        log_sink.clone(),
+        lease.task.job_id,
+        lease.task.id,
+        "stderr",
+        LogLevel::Error,
+    ));
+
+    let status = if let Some(timeout_seconds) = command.timeout_seconds {
+        match tokio::time::timeout(Duration::from_secs(timeout_seconds), child.wait()).await {
+            Ok(status) => status.context("task process failed")?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(anyhow::anyhow!("task timed out"));
+            }
+        }
     } else {
-        let output = future.await.context("task process failed")?;
-        Ok(process_output(output))
-    }
+        child.wait().await.context("task process failed")?
+    };
+
+    let stdout = stdout_task
+        .await
+        .context("stdout reader task failed")?
+        .context("stdout read failed")?;
+    let stderr = stderr_task
+        .await
+        .context("stderr reader task failed")?
+        .context("stderr read failed")?;
+
+    Ok(ExecutionOutput {
+        exit_code: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+        artifacts: Vec::new(),
+    })
 }
 
-async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
+async fn execute_openjd(
+    log_sink: &WorkerLogSink,
+    task: &Task,
+    openjd: &OpenJdRuntimeTask,
+) -> Result<ExecutionOutput> {
     let tmp = tempfile::TempDir::new().context("create OpenJD session directory")?;
     let job_parameters = openjd
         .job_parameters
@@ -313,16 +473,24 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
             .await
         {
             Ok((id, output)) => {
+                log_sink
+                    .post_lines(task.job_id, task.id, "stdout", LogLevel::Info, &output)
+                    .await;
                 stdout.push_str(&output);
                 job_env_entries.push((id, resolved));
             }
             Err(err) => {
-                stderr.push_str(&format!("OpenJD job environment failed: {err}\n"));
+                let message = format!("OpenJD job environment failed: {err}\n");
+                log_sink
+                    .post_lines(task.job_id, task.id, "stderr", LogLevel::Error, &message)
+                    .await;
+                stderr.push_str(&message);
                 session.cleanup();
                 return Ok(ExecutionOutput {
                     exit_code: -1,
                     stdout,
                     stderr,
+                    artifacts: Vec::new(),
                 });
             }
         }
@@ -337,16 +505,24 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
             .await
         {
             Ok((id, output)) => {
+                log_sink
+                    .post_lines(task.job_id, task.id, "stdout", LogLevel::Info, &output)
+                    .await;
                 stdout.push_str(&output);
                 step_env_ids.push(id);
             }
             Err(err) => {
-                stderr.push_str(&format!("OpenJD step environment failed: {err}\n"));
+                let message = format!("OpenJD step environment failed: {err}\n");
+                log_sink
+                    .post_lines(task.job_id, task.id, "stderr", LogLevel::Error, &message)
+                    .await;
+                stderr.push_str(&message);
                 session.cleanup();
                 return Ok(ExecutionOutput {
                     exit_code: -1,
                     stdout,
                     stderr,
+                    artifacts: Vec::new(),
                 });
             }
         }
@@ -366,6 +542,15 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
         .await;
     let exit_code = match result {
         Ok(result) => {
+            log_sink
+                .post_lines(
+                    task.job_id,
+                    task.id,
+                    "stdout",
+                    LogLevel::Info,
+                    &result.stdout,
+                )
+                .await;
             stdout.push_str(&result.stdout);
             match result.state {
                 ActionState::Success => 0,
@@ -373,7 +558,11 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
             }
         }
         Err(err) => {
-            stderr.push_str(&format!("OpenJD task failed: {err}\n"));
+            let message = format!("OpenJD task failed: {err}\n");
+            log_sink
+                .post_lines(task.job_id, task.id, "stderr", LogLevel::Error, &message)
+                .await;
+            stderr.push_str(&message);
             -1
         }
     };
@@ -383,6 +572,9 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
             .exit_environment(id, step_resolved.as_ref(), true, None)
             .await
         {
+            log_sink
+                .post_lines(task.job_id, task.id, "stdout", LogLevel::Info, &output)
+                .await;
             stdout.push_str(&output);
         }
     }
@@ -391,6 +583,9 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
             .exit_environment(id, resolved.as_ref(), true, None)
             .await
         {
+            log_sink
+                .post_lines(task.job_id, task.id, "stdout", LogLevel::Info, &output)
+                .await;
             stdout.push_str(&output);
         }
     }
@@ -400,14 +595,154 @@ async fn execute_openjd(openjd: &OpenJdRuntimeTask) -> Result<ExecutionOutput> {
         exit_code,
         stdout,
         stderr,
+        artifacts: Vec::new(),
     })
 }
 
-fn process_output(output: std::process::Output) -> ExecutionOutput {
-    ExecutionOutput {
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+async fn read_stream_lines<R>(
+    stream: R,
+    log_sink: WorkerLogSink,
+    job_id: uuid::Uuid,
+    task_id: uuid::Uuid,
+    stream_name: &'static str,
+    level: LogLevel,
+) -> Result<String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut captured = String::new();
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines.next_line().await? {
+        captured.push_str(&line);
+        captured.push('\n');
+        log_sink
+            .post_line(
+                level.clone(),
+                Some(stream_name.to_string()),
+                line,
+                Some(job_id),
+                Some(task_id),
+            )
+            .await;
+    }
+    Ok(captured)
+}
+
+fn collect_artifacts(
+    task: &Task,
+    stdout: &str,
+    stderr: &str,
+    started_at: SystemTime,
+) -> Vec<TaskArtifact> {
+    let mut exact_paths = artifact_directive_paths(stdout)
+        .into_iter()
+        .chain(artifact_directive_paths(stderr))
+        .collect::<Vec<_>>();
+    let mut directory_paths = task.artifact_paths.clone();
+    exact_paths.extend(
+        task.artifact_paths
+            .iter()
+            .filter(|path| path.is_file())
+            .cloned(),
+    );
+    directory_paths.retain(|path| path.is_dir());
+
+    let mut artifacts = Vec::new();
+    let mut seen = HashSet::new();
+    for path in exact_paths {
+        push_artifact(&path, &mut artifacts, &mut seen);
+    }
+    let since = started_at
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or(started_at);
+    for path in directory_paths {
+        collect_modified_files(&path, since, &mut artifacts, &mut seen);
+    }
+    artifacts
+}
+
+fn artifact_directive_paths(buffer: &str) -> Vec<PathBuf> {
+    buffer
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("RENDERACRE_ARTIFACT="))
+        .map(|path| PathBuf::from(path.trim()))
+        .collect()
+}
+
+fn collect_modified_files(
+    root: &Path,
+    since: SystemTime,
+    artifacts: &mut Vec<TaskArtifact>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if artifacts.len() >= 128 {
+            return;
+        }
+        let Ok(read_dir) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+            } else if metadata
+                .modified()
+                .map(|modified| modified >= since)
+                .unwrap_or(false)
+            {
+                push_artifact(&path, artifacts, seen);
+            }
+        }
+    }
+}
+
+fn push_artifact(path: &Path, artifacts: &mut Vec<TaskArtifact>, seen: &mut HashSet<PathBuf>) {
+    let Ok(path) = path.canonicalize() else {
+        return;
+    };
+    if !seen.insert(path.clone()) {
+        return;
+    }
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return;
+    };
+    if !metadata.is_file() {
+        return;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact")
+        .to_string();
+    artifacts.push(TaskArtifact {
+        kind: artifact_kind(&name),
+        name,
+        path,
+        size_bytes: metadata.len(),
+        modified_at: metadata
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from),
+    });
+}
+
+fn artifact_kind(name: &str) -> ArtifactKind {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" | "jpg" | "jpeg" | "webp" | "gif" => ArtifactKind::Image,
+        "ma" | "mb" | "blend" | "usd" | "usda" | "usdc" => ArtifactKind::Scene,
+        "txt" | "log" => ArtifactKind::Log,
+        _ => ArtifactKind::File,
     }
 }
 

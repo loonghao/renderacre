@@ -1613,6 +1613,7 @@ name = "renderacre-worker"
 version = "0.1.4"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "farm-core",
  "openjd-expr",

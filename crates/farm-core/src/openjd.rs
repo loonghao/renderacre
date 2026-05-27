@@ -211,12 +211,26 @@ fn expand_openjd_tasks(
                 command,
                 dependencies,
                 max_retries: None,
+                artifact_paths: infer_artifact_paths(&job_parameters),
                 openjd: Some(openjd),
             });
         }
     }
 
     Ok(tasks)
+}
+
+fn infer_artifact_paths(job_parameters: &HashMap<String, OpenJdParameterValue>) -> Vec<PathBuf> {
+    job_parameters
+        .iter()
+        .filter_map(|(name, value)| {
+            let lower = name.to_ascii_lowercase();
+            if !(lower.contains("output") || lower.contains("artifact")) {
+                return None;
+            }
+            value.value.as_str().map(PathBuf::from)
+        })
+        .collect()
 }
 
 fn task_parameter_sets(

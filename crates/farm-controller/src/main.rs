@@ -1,16 +1,17 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, ValueEnum};
 use farm_core::{
-    DashboardSnapshot, FarmError, FarmStats, InMemoryScheduler, Job, JobId, JobSubmit,
-    SchedulerConfig, SqliteScheduler, Task, TaskComplete, TaskId, TaskLease, TaskLeaseRenewal,
-    TaskStarted, WorkerId, WorkerInfo, WorkerRegister,
+    DashboardSnapshot, FarmError, FarmLogEntry, FarmStats, InMemoryScheduler, Job, JobId,
+    JobSubmit, SchedulerConfig, SqliteScheduler, Task, TaskComplete, TaskId, TaskLease,
+    TaskLeaseRenewal, TaskStarted, WorkerId, WorkerInfo, WorkerLogBatch, WorkerRegister,
 };
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -76,6 +77,31 @@ impl AppScheduler {
         }
     }
 
+    fn list_logs(&self) -> Result<Vec<FarmLogEntry>, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.list_logs(),
+            Self::Sqlite(scheduler) => scheduler.list_logs(),
+        }
+    }
+
+    fn list_worker_logs(&self, worker_id: WorkerId) -> Result<Vec<FarmLogEntry>, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.list_worker_logs(worker_id),
+            Self::Sqlite(scheduler) => scheduler.list_worker_logs(worker_id),
+        }
+    }
+
+    fn record_worker_logs(
+        &self,
+        worker_id: WorkerId,
+        batch: WorkerLogBatch,
+    ) -> Result<Vec<FarmLogEntry>, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.record_worker_logs(worker_id, batch),
+            Self::Sqlite(scheduler) => scheduler.record_worker_logs(worker_id, batch),
+        }
+    }
+
     fn register_worker(&self, registration: WorkerRegister) -> Result<WorkerInfo, FarmError> {
         match self {
             Self::Memory(scheduler) => scheduler.register_worker(registration),
@@ -121,6 +147,17 @@ impl AppScheduler {
             Self::Sqlite(scheduler) => scheduler.renew_task_lease(task_id, renewal),
         }
     }
+
+    fn get_task_artifact(
+        &self,
+        task_id: TaskId,
+        artifact_index: usize,
+    ) -> Result<farm_core::TaskArtifact, FarmError> {
+        match self {
+            Self::Memory(scheduler) => scheduler.get_task_artifact(task_id, artifact_index),
+            Self::Sqlite(scheduler) => scheduler.get_task_artifact(task_id, artifact_index),
+        }
+    }
 }
 
 #[tokio::main]
@@ -153,16 +190,25 @@ fn app(scheduler: AppScheduler) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/dashboard", get(get_dashboard))
+        .route("/v1/logs", get(list_logs))
         .route("/v1/stats", get(get_stats))
         .route("/v1/jobs", get(list_jobs).post(submit_job))
         .route("/v1/jobs/{job_id}", get(get_job))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/register", post(register_worker))
+        .route(
+            "/v1/workers/{worker_id}/logs",
+            get(list_worker_logs).post(record_worker_logs),
+        )
         .route("/v1/workers/{worker_id}/heartbeat", post(heartbeat_worker))
         .route("/v1/workers/{worker_id}/lease", post(lease_task))
         .route("/v1/tasks/{task_id}/started", post(mark_task_started))
         .route("/v1/tasks/{task_id}/renew", post(renew_task_lease))
         .route("/v1/tasks/{task_id}/complete", post(complete_task))
+        .route(
+            "/v1/tasks/{task_id}/artifacts/{artifact_index}",
+            get(download_task_artifact),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(scheduler)
@@ -206,11 +252,32 @@ async fn get_dashboard(
     Ok(Json(scheduler.dashboard_snapshot()?))
 }
 
+async fn list_logs(
+    State(scheduler): State<AppScheduler>,
+) -> Result<Json<Vec<FarmLogEntry>>, ApiError> {
+    Ok(Json(scheduler.list_logs()?))
+}
+
 async fn register_worker(
     State(scheduler): State<AppScheduler>,
     Json(registration): Json<WorkerRegister>,
 ) -> Result<Json<WorkerInfo>, ApiError> {
     Ok(Json(scheduler.register_worker(registration)?))
+}
+
+async fn list_worker_logs(
+    State(scheduler): State<AppScheduler>,
+    Path(worker_id): Path<WorkerId>,
+) -> Result<Json<Vec<FarmLogEntry>>, ApiError> {
+    Ok(Json(scheduler.list_worker_logs(worker_id)?))
+}
+
+async fn record_worker_logs(
+    State(scheduler): State<AppScheduler>,
+    Path(worker_id): Path<WorkerId>,
+    Json(batch): Json<WorkerLogBatch>,
+) -> Result<Json<Vec<FarmLogEntry>>, ApiError> {
+    Ok(Json(scheduler.record_worker_logs(worker_id, batch)?))
 }
 
 async fn heartbeat_worker(
@@ -251,27 +318,84 @@ async fn complete_task(
     Ok(Json(scheduler.complete_task(task_id, completion)?))
 }
 
-struct ApiError(FarmError);
+async fn download_task_artifact(
+    State(scheduler): State<AppScheduler>,
+    Path((task_id, artifact_index)): Path<(TaskId, usize)>,
+) -> Result<Response, ApiError> {
+    let artifact = scheduler.get_task_artifact(task_id, artifact_index)?;
+    let bytes = tokio::fs::read(&artifact.path).await.map_err(|error| {
+        ApiError::message(
+            StatusCode::NOT_FOUND,
+            format!("artifact file is not readable: {error}"),
+        )
+    })?;
+    let filename = artifact.name.replace(['\\', '/', '"'], "_");
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type_for(&artifact.name)),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("inline; filename=\"{filename}\""))
+            .unwrap_or_else(|_| HeaderValue::from_static("inline")),
+    );
+    Ok(response)
+}
+
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn message(status: StatusCode, message: String) -> Self {
+        Self { status, message }
+    }
+}
 
 impl From<FarmError> for ApiError {
     fn from(value: FarmError) -> Self {
-        Self(value)
+        let status = match value {
+            FarmError::JobNotFound(_)
+            | FarmError::TaskNotFound(_)
+            | FarmError::WorkerNotFound(_)
+            | FarmError::ArtifactNotFound { .. } => StatusCode::NOT_FOUND,
+            FarmError::InvalidSubmission(_) => StatusCode::BAD_REQUEST,
+            FarmError::InvalidLease => StatusCode::CONFLICT,
+            FarmError::LockPoisoned | FarmError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self {
+            status,
+            message: value.to_string(),
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match self.0 {
-            FarmError::JobNotFound(_)
-            | FarmError::TaskNotFound(_)
-            | FarmError::WorkerNotFound(_) => StatusCode::NOT_FOUND,
-            FarmError::InvalidSubmission(_) => StatusCode::BAD_REQUEST,
-            FarmError::InvalidLease => StatusCode::CONFLICT,
-            FarmError::LockPoisoned | FarmError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
         let body = Json(json!({
-            "error": self.0.to_string(),
+            "error": self.message,
         }));
-        (status, body).into_response()
+        (self.status, body).into_response()
+    }
+}
+
+fn content_type_for(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "ma" | "mb" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }

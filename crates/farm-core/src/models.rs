@@ -37,6 +37,8 @@ pub struct TaskSubmit {
     #[serde(default)]
     pub max_retries: Option<u32>,
     #[serde(default)]
+    pub artifact_paths: Vec<PathBuf>,
+    #[serde(default)]
     pub openjd: Option<OpenJdRuntimeTask>,
 }
 
@@ -394,6 +396,7 @@ pub struct DashboardSnapshot {
     pub stats: FarmStats,
     pub jobs: Vec<Job>,
     pub workers: Vec<WorkerInfo>,
+    pub logs: Vec<FarmLogEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -434,7 +437,30 @@ pub struct Task {
     pub stdout_tail: Option<String>,
     pub stderr_tail: Option<String>,
     #[serde(default)]
+    pub artifact_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
+    #[serde(default)]
     pub openjd: Option<OpenJdRuntimeTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskArtifact {
+    pub name: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub kind: ArtifactKind,
+    #[serde(default)]
+    pub modified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Image,
+    Scene,
+    Log,
+    File,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,6 +515,58 @@ pub struct WorkerInfo {
     pub last_seen_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerLogBatch {
+    #[serde(default)]
+    pub entries: Vec<WorkerLogInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerLogInput {
+    pub level: LogLevel,
+    #[serde(default)]
+    pub stream: Option<String>,
+    pub message: String,
+    #[serde(default)]
+    pub job_id: Option<JobId>,
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FarmLogEntry {
+    pub id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub level: LogLevel,
+    pub source: LogSource,
+    #[serde(default)]
+    pub stream: Option<String>,
+    pub message: String,
+    #[serde(default)]
+    pub job_id: Option<JobId>,
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+    #[serde(default)]
+    pub worker_id: Option<WorkerId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogSource {
+    Controller,
+    Worker,
+    Task,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerState {
@@ -531,6 +609,8 @@ pub struct TaskComplete {
     pub stdout_tail: Option<String>,
     #[serde(default)]
     pub stderr_tail: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
 }
 
 fn default_max_retries() -> u32 {

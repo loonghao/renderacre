@@ -26,6 +26,14 @@ jobs:
       - name: Run Python OpenJD e2e
         run: python scripts/e2e_dcc_tasks.py --jobs python
 
+      - name: Upload Python e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-e2e-artifacts
+          path: target/e2e-dcc/python-artifacts/*
+          if-no-files-found: ignore
+
   blender-openjd:
     name: Blender OpenJD ${{ matrix.blender-version }}
     runs-on: ubuntu-latest
@@ -69,6 +77,14 @@ jobs:
       - name: Run Blender OpenJD e2e
         run: xvfb-run -a python scripts/e2e_dcc_tasks.py --jobs blender --blender-exe blender
 
+      - name: Upload Blender render outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-render-${{ matrix.blender-version }}
+          path: target/e2e-dcc/blender/*.png
+          if-no-files-found: error
+
   maya-openjd:
     name: Maya OpenJD ${{ matrix.maya-version }}
     runs-on: ubuntu-latest
@@ -107,3 +123,11 @@ jobs:
 
       - name: Run Maya OpenJD e2e
         run: mayapy scripts/e2e_dcc_tasks.py --jobs maya --maya-python mayapy
+
+      - name: Upload Maya e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maya-render-${{ matrix.maya-version }}
+          path: target/e2e-dcc/maya/*.ma
+          if-no-files-found: ignore
